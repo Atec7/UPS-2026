@@ -386,7 +386,7 @@ function onTeamGradeChange() {
   });
   if (type === 'miscellany') {
     totalUps = 5.6;
-  } else if (type === 'emergency') {
+  } else {
     teamCatalogCache.forEach(function(svc) {
       var chk = $('chk_' + svc.id);
       if (chk && chk.checked) {
@@ -395,7 +395,14 @@ function onTeamGradeChange() {
       }
     });
   }
-  if (totalUps > 0 || type === 'emergency') {
+  teamCatalogCache.forEach(function(svc) {
+    var chk = $('chk_' + svc.id);
+    if (chk && chk.checked) {
+      var qty = parseFloat($('qty_' + svc.id).value) || 1;
+      totalMoney += qty * (svc.money_value || 0);
+    }
+  });
+  if (totalUps > 0 || type === 'emergency' || type === 'commercial') {
     calc.style.display = 'flex';
     $('teamCalcUps').textContent = fmtUps(totalUps);
     $('teamCalcMoney').textContent = fmtMoney(totalMoney);
@@ -422,25 +429,29 @@ function addTeamService() {
   if (selectedSvcs.length === 0) { showMsg('teamFormMsg', 'error', 'Selecione ao menos uma atividade'); return; }
   loading(true);
   var totalUps;
+  var totalMoney = 0;
   if (type === 'miscellany') {
     totalUps = 5.6;
   } else {
     totalUps = selectedSvcs.reduce(function(sum, s) { return sum + s.qty * (s.svc.ups_value || 0); }, 0);
   }
-  submitNewEntry(type, nota, selectedSvcs, totalUps, 0);
+  totalMoney = selectedSvcs.reduce(function(sum, s) { return sum + s.qty * (s.svc.money_value || 0); }, 0);
+  submitNewEntry(type, nota, selectedSvcs, totalUps, totalMoney);
 }
 
 function submitNewEntry(type, grade, selectedSvcs, upsValue, moneyValue) {
   var svcNames = selectedSvcs.map(function(s) { return s.svc.name; }).join(', ');
   var totalQty = selectedSvcs.reduce(function(sum, s) { return sum + s.qty; }, 0);
   var upsPerUnit = totalQty > 0 ? upsValue / totalQty : upsValue;
+  var moneyPerUnit = totalQty > 0 && moneyValue > 0 ? moneyValue / totalQty : 0;
+  var typeLabel = type === 'miscellany' ? 'Miscelânea' : (type === 'emergency' ? 'Emergência' : (type === 'commercial' ? 'Comercial' : ''));
   var serviceData = {
     user_id: currentUser.id,
-    service_name: (type === 'miscellany' ? 'Miscelânea: ' + svcNames : (type === 'emergency' ? 'Emergência: ' + svcNames : svcNames)),
+    service_name: typeLabel + ': ' + svcNames,
     ups_value: upsValue,
     quantity: totalQty,
     ups_per_unit: upsPerUnit,
-    money_per_unit: 0,
+    money_per_unit: moneyPerUnit,
     total_money: moneyValue,
     grade: grade,
     type: type,
@@ -623,7 +634,7 @@ function loadStatistics() {
     var totalUps = filtered.reduce(function(s, sv) { return s + (sv.ups_value || 0); }, 0);
     var totalMoney = filtered.reduce(function(s, sv) { return s + (sv.total_money || 0); }, 0);
     var grades = filtered.filter(function(s) { return s.grade > 0; }).map(function(s) { return s.grade; });
-    var avgGrade = grades.length > 0 ? (grades.reduce(function(a, b) { return a + b; }, 0) / grades.length) : 0;
+    var totalGrade = grades.length > 0 ? grades.reduce(function(a, b) { return a + b; }, 0) : 0;
 
     var userMap = {};
     users.forEach(function(u) { userMap[u.id] = u.username; });
@@ -663,13 +674,13 @@ function loadStatistics() {
         userId: uid, username: userMap[uid] || 'Desconhecido',
         ups: topTeams[uid].ups, money: topTeams[uid].money,
         count: topTeams[uid].count,
-        avgGrade: g.length > 0 ? (g.reduce(function(a, b) { return a + b; }, 0) / g.length) : 0
+        totalGrade: g.length > 0 ? g.reduce(function(a, b) { return a + b; }, 0) : 0
       };
     }).sort(function(a, b) { return b.ups - a.ups; });
 
     renderStatistics({
       totalUps: totalUps, totalMoney: totalMoney, totalServices: filtered.length,
-      avgGrade: avgGrade, topService: topService, topServiceCount: topServiceCount,
+      totalGrade: totalGrade, topService: topService, topServiceCount: topServiceCount,
       svcCount: svcCount, svcUps: svcUps, svcNames: svcNames,
       dailyData: dailyData, dates: dates,
       teamRanking: teamRanking
@@ -688,7 +699,7 @@ function renderStatistics(stats) {
     '<div class="stat-box"><span class="stat-box-icon ups"><span class="material-symbols-outlined">trending_up</span></span><div><div class="stat-box-value">' + stats.totalUps + '</div><div class="stat-box-label">Total UPS</div></div></div>' +
     '<div class="stat-box"><span class="stat-box-icon money"><span class="material-symbols-outlined">payments</span></span><div><div class="stat-box-value">' + fmtMoney(stats.totalMoney) + '</div><div class="stat-box-label">Total R$</div></div></div>' +
     '<div class="stat-box"><span class="stat-box-icon services"><span class="material-symbols-outlined">assignment</span></span><div><div class="stat-box-value">' + stats.totalServices + '</div><div class="stat-box-label">Serviços</div></div></div>' +
-    '<div class="stat-box"><span class="stat-box-icon grade"><span class="material-symbols-outlined">star</span></span><div><div class="stat-box-value">' + stats.avgGrade.toFixed(1) + '</div><div class="stat-box-label">Média Notas</div></div></div>' +
+    '<div class="stat-box"><span class="stat-box-icon grade"><span class="material-symbols-outlined">star</span></span><div><div class="stat-box-value">' + stats.totalGrade + '</div><div class="stat-box-label">Total Notas</div></div></div>' +
     '<div class="stat-box"><span class="stat-box-icon teams"><span class="material-symbols-outlined">signal_cellular_alt</span></span><div><div class="stat-box-value">' + escapeHtml(stats.topService) + '</div><div class="stat-box-label">Serviço Top</div></div></div>' +
     '<div class="stat-box"><span class="stat-box-icon online"><span class="material-symbols-outlined">repeat</span></span><div><div class="stat-box-value">' + stats.topServiceCount + '</div><div class="stat-box-label">Execuções Top</div></div></div>' +
     '</div>';
@@ -723,7 +734,7 @@ function renderStatistics(stats) {
 
   html += '<div class="card"><div class="card-title"><span class="material-symbols-outlined">leaderboard</span> Ranking de Equipes (UPS)</div>';
   if (stats.teamRanking.length > 0) {
-    html += '<div class="table-wrap"><table><thead><tr><th>#</th><th>Equipe</th><th>UPS</th><th>R$</th><th>Serviços</th><th>Média Nota</th></tr></thead><tbody>';
+    html += '<div class="table-wrap"><table><thead><tr><th>#</th><th>Equipe</th><th>UPS</th><th>R$</th><th>Serviços</th><th>Total Notas</th></tr></thead><tbody>';
     for (var i = 0; i < stats.teamRanking.length; i++) {
       var tr = stats.teamRanking[i];
       html += '<tr>' +
@@ -732,7 +743,7 @@ function renderStatistics(stats) {
         '<td style="font-weight:700;color:var(--primary);">' + tr.ups + '</td>' +
         '<td style="color:var(--money);font-weight:600;">' + fmtMoney(tr.money) + '</td>' +
         '<td>' + tr.count + '</td>' +
-        '<td>' + (tr.avgGrade > 0 ? tr.avgGrade.toFixed(1) : '-') + '</td>' +
+        '<td>' + (tr.totalGrade > 0 ? tr.totalGrade : '-') + '</td>' +
         '</tr>';
     }
     html += '</tbody></table></div>';
@@ -878,7 +889,7 @@ function renderPainel(data) {
   data.forEach(function(t) {
     t.services.forEach(function(s) { if (s.grade > 0) grades.push(s.grade); });
   });
-  var avgGrade = grades.length > 0 ? (grades.reduce(function(a, b) { return a + b; }, 0) / grades.length) : 0;
+  var totalGrade = grades.length > 0 ? grades.reduce(function(a, b) { return a + b; }, 0) : 0;
 
   var sorted = data.slice().sort(function(a, b) { return b.totalUps - a.totalUps; });
 
@@ -888,7 +899,7 @@ function renderPainel(data) {
     '<div class="stat-box"><span class="stat-box-icon ups"><span class="material-symbols-outlined">trending_up</span></span><div><div class="stat-box-value">' + totalUpsAll + '</div><div class="stat-box-label">Total UPS</div></div></div>' +
     '<div class="stat-box"><span class="stat-box-icon money"><span class="material-symbols-outlined">payments</span></span><div><div class="stat-box-value">' + fmtMoney(totalMoneyAll) + '</div><div class="stat-box-label">Total R$</div></div></div>' +
     '<div class="stat-box"><span class="stat-box-icon services"><span class="material-symbols-outlined">assignment</span></span><div><div class="stat-box-value">' + totalServicesAll + '</div><div class="stat-box-label">Serviços</div></div></div>' +
-    '<div class="stat-box"><span class="stat-box-icon grade"><span class="material-symbols-outlined">star</span></span><div><div class="stat-box-value">' + avgGrade.toFixed(1) + '</div><div class="stat-box-label">Média Notas</div></div></div>' +
+    '<div class="stat-box"><span class="stat-box-icon grade"><span class="material-symbols-outlined">star</span></span><div><div class="stat-box-value">' + totalGrade + '</div><div class="stat-box-label">Total Notas</div></div></div>' +
     '</div>';
 
   html += '<div style="margin:16px 0 8px;font-size:13px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;">Ranking de Equipes</div>';
@@ -900,7 +911,7 @@ function renderPainel(data) {
     var statusInfo = getStatusInfo(t.lastSeen);
     var barWidth = t.totalUps > 0 ? Math.max(4, (t.totalUps / sorted[0].totalUps) * 100) : 0;
     var teamGrades = t.services.filter(function(s) { return s.grade > 0; }).map(function(s) { return s.grade; });
-    var teamAvgGrade = teamGrades.length > 0 ? (teamGrades.reduce(function(a, b) { return a + b; }, 0) / teamGrades.length) : 0;
+    var teamTotalGrade = teamGrades.length > 0 ? teamGrades.reduce(function(a, b) { return a + b; }, 0) : 0;
 
     html += '<div class="ranking-item" onclick="openTeamModal(\'' + t.userId + '\')">' +
       '<div class="ranking-pos">' + medal + '</div>' +
@@ -913,7 +924,7 @@ function renderPainel(data) {
       '<div class="ranking-ups">' + t.totalUps + ' UPS</div>' +
       (t.totalMoney ? '<div class="ranking-money">' + fmtMoney(t.totalMoney) + '</div>' : '') +
       '<div class="ranking-count">' + t.count + ' servi\u00E7o' + (t.count !== 1 ? 's' : '') + '</div>' +
-      (teamAvgGrade > 0 ? '<div class="ranking-grade">Nota: ' + teamAvgGrade.toFixed(1) + '</div>' : '') +
+      (teamTotalGrade > 0 ? '<div class="ranking-grade">Notas: ' + teamTotalGrade + '</div>' : '') +
       '</div>' +
       '<div class="ranking-bar"><div class="ranking-bar-fill" style="width:' + barWidth + '%;background:' + color + ';"></div></div>' +
       '</div>';
