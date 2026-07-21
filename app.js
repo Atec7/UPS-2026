@@ -529,6 +529,17 @@ function renderTeamSummary(summary) {
   $('teamTotal').textContent = summary.totalUps;
   $('teamTotalMoney').textContent = fmtMoney(summary.totalMoney || 0);
   $('teamCount').textContent = summary.count + ' servi\u00E7o' + (summary.count !== 1 ? 's' : '') + ' hoje';
+  var goalSection = $('teamGoalSection');
+  if (summary.goal_money > 0) {
+    var goalPct = Math.min(100, Math.round((summary.totalMoney / summary.goal_money) * 100));
+    goalSection.style.display = 'block';
+    $('teamGoalValue').textContent = fmtMoney(summary.goal_money);
+    $('teamGoalPercent').textContent = goalPct + '%';
+    $('teamGoalBar').style.width = Math.min(100, (summary.totalMoney / summary.goal_money) * 100) + '%';
+    $('teamGoalBar').style.background = goalPct >= 100 ? 'var(--success)' : goalPct >= 70 ? 'var(--warning)' : 'var(--money)';
+  } else {
+    goalSection.style.display = 'none';
+  }
 }
 
 function renderTeamServices(services) {
@@ -581,7 +592,9 @@ function deleteService(serviceId) {
 
 // ===== DATA FUNCTIONS =====
 function getTeamSummary(userId, startDate, endDate) {
-  return fbOnce('services').then(function(allServices) {
+  return Promise.all([fbOnce('services'), fbOnce('users/' + userId)]).then(function(results) {
+    var allServices = results[0];
+    var userData = results[1];
     var arr = toArray(allServices);
     var filtered = arr.filter(function(s) {
       return s.user_id === userId && s.date >= startDate && s.date <= endDate;
@@ -592,6 +605,7 @@ function getTeamSummary(userId, startDate, endDate) {
     var classInfo = getClassification(totalUps);
     return {
       userId: userId, startDate: startDate, endDate: endDate,
+      goal_money: (userData && userData.goal_money) || 0,
       services: services, totalUps: totalUps, totalMoney: totalMoney,
       class: classInfo.class, color: classInfo.color, count: services.length
     };
@@ -612,6 +626,8 @@ function getAllTeamsSummaryForPeriod(startDate, endDate) {
       var classInfo = getClassification(totalUps);
       return {
         userId: user.id, username: user.username,
+        supervisor: user.supervisor || '',
+        goal_money: user.goal_money || 0,
         latitude: user.latitude || '', longitude: user.longitude || '',
         address: user.address || '',
         lastSeen: user.last_seen || null,
@@ -634,7 +650,7 @@ function loadStatistics() {
     var totalUps = filtered.reduce(function(s, sv) { return s + (sv.ups_value || 0); }, 0);
     var totalMoney = filtered.reduce(function(s, sv) { return s + (sv.total_money || 0); }, 0);
     var grades = filtered.filter(function(s) { return s.grade > 0; }).map(function(s) { return s.grade; });
-    var totalGrade = grades.length > 0 ? grades.reduce(function(a, b) { return a + b; }, 0) : 0;
+    var totalGradeCount = grades.length;
 
     var userMap = {};
     users.forEach(function(u) { userMap[u.id] = u.username; });
@@ -674,13 +690,13 @@ function loadStatistics() {
         userId: uid, username: userMap[uid] || 'Desconhecido',
         ups: topTeams[uid].ups, money: topTeams[uid].money,
         count: topTeams[uid].count,
-        totalGrade: g.length > 0 ? g.reduce(function(a, b) { return a + b; }, 0) : 0
+        totalGradeCount: g.length
       };
     }).sort(function(a, b) { return b.ups - a.ups; });
 
     renderStatistics({
       totalUps: totalUps, totalMoney: totalMoney, totalServices: filtered.length,
-      totalGrade: totalGrade, topService: topService, topServiceCount: topServiceCount,
+      totalGradeCount: totalGradeCount, topService: topService, topServiceCount: topServiceCount,
       svcCount: svcCount, svcUps: svcUps, svcNames: svcNames,
       dailyData: dailyData, dates: dates,
       teamRanking: teamRanking
@@ -699,7 +715,7 @@ function renderStatistics(stats) {
     '<div class="stat-box"><span class="stat-box-icon ups"><span class="material-symbols-outlined">trending_up</span></span><div><div class="stat-box-value">' + stats.totalUps + '</div><div class="stat-box-label">Total UPS</div></div></div>' +
     '<div class="stat-box"><span class="stat-box-icon money"><span class="material-symbols-outlined">payments</span></span><div><div class="stat-box-value">' + fmtMoney(stats.totalMoney) + '</div><div class="stat-box-label">Total R$</div></div></div>' +
     '<div class="stat-box"><span class="stat-box-icon services"><span class="material-symbols-outlined">assignment</span></span><div><div class="stat-box-value">' + stats.totalServices + '</div><div class="stat-box-label">Serviços</div></div></div>' +
-    '<div class="stat-box"><span class="stat-box-icon grade"><span class="material-symbols-outlined">star</span></span><div><div class="stat-box-value">' + stats.totalGrade + '</div><div class="stat-box-label">Total Notas</div></div></div>' +
+    '<div class="stat-box"><span class="stat-box-icon grade"><span class="material-symbols-outlined">star</span></span><div><div class="stat-box-value">' + stats.totalGradeCount + '</div><div class="stat-box-label">Total Notas</div></div></div>' +
     '<div class="stat-box"><span class="stat-box-icon teams"><span class="material-symbols-outlined">signal_cellular_alt</span></span><div><div class="stat-box-value">' + escapeHtml(stats.topService) + '</div><div class="stat-box-label">Serviço Top</div></div></div>' +
     '<div class="stat-box"><span class="stat-box-icon online"><span class="material-symbols-outlined">repeat</span></span><div><div class="stat-box-value">' + stats.topServiceCount + '</div><div class="stat-box-label">Execuções Top</div></div></div>' +
     '</div>';
@@ -734,7 +750,7 @@ function renderStatistics(stats) {
 
   html += '<div class="card"><div class="card-title"><span class="material-symbols-outlined">leaderboard</span> Ranking de Equipes (UPS)</div>';
   if (stats.teamRanking.length > 0) {
-    html += '<div class="table-wrap"><table><thead><tr><th>#</th><th>Equipe</th><th>UPS</th><th>R$</th><th>Serviços</th><th>Total Notas</th></tr></thead><tbody>';
+    html += '<div class="table-wrap"><table><thead><tr><th>#</th><th>Equipe</th><th>UPS</th><th>R$</th><th>Serviços</th><th>Notas</th></tr></thead><tbody>';
     for (var i = 0; i < stats.teamRanking.length; i++) {
       var tr = stats.teamRanking[i];
       html += '<tr>' +
@@ -743,7 +759,7 @@ function renderStatistics(stats) {
         '<td style="font-weight:700;color:var(--primary);">' + tr.ups + '</td>' +
         '<td style="color:var(--money);font-weight:600;">' + fmtMoney(tr.money) + '</td>' +
         '<td>' + tr.count + '</td>' +
-        '<td>' + (tr.totalGrade > 0 ? tr.totalGrade : '-') + '</td>' +
+        '<td>' + (tr.totalGradeCount > 0 ? tr.totalGradeCount : '-') + '</td>' +
         '</tr>';
     }
     html += '</tbody></table></div>';
@@ -834,6 +850,9 @@ function initTabs() {
       if (tabId === 'tabRegras') {
         loadRules();
       }
+      if (tabId === 'tabSupervisores') {
+        loadSupervisores();
+      }
     });
   }
 }
@@ -889,7 +908,7 @@ function renderPainel(data) {
   data.forEach(function(t) {
     t.services.forEach(function(s) { if (s.grade > 0) grades.push(s.grade); });
   });
-  var totalGrade = grades.length > 0 ? grades.reduce(function(a, b) { return a + b; }, 0) : 0;
+  var totalGradeCount = grades.length;
 
   var sorted = data.slice().sort(function(a, b) { return b.totalUps - a.totalUps; });
 
@@ -899,7 +918,7 @@ function renderPainel(data) {
     '<div class="stat-box"><span class="stat-box-icon ups"><span class="material-symbols-outlined">trending_up</span></span><div><div class="stat-box-value">' + totalUpsAll + '</div><div class="stat-box-label">Total UPS</div></div></div>' +
     '<div class="stat-box"><span class="stat-box-icon money"><span class="material-symbols-outlined">payments</span></span><div><div class="stat-box-value">' + fmtMoney(totalMoneyAll) + '</div><div class="stat-box-label">Total R$</div></div></div>' +
     '<div class="stat-box"><span class="stat-box-icon services"><span class="material-symbols-outlined">assignment</span></span><div><div class="stat-box-value">' + totalServicesAll + '</div><div class="stat-box-label">Serviços</div></div></div>' +
-    '<div class="stat-box"><span class="stat-box-icon grade"><span class="material-symbols-outlined">star</span></span><div><div class="stat-box-value">' + totalGrade + '</div><div class="stat-box-label">Total Notas</div></div></div>' +
+    '<div class="stat-box"><span class="stat-box-icon grade"><span class="material-symbols-outlined">star</span></span><div><div class="stat-box-value">' + totalGradeCount + '</div><div class="stat-box-label">Total Notas</div></div></div>' +
     '</div>';
 
   html += '<div style="margin:16px 0 8px;font-size:13px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;">Ranking de Equipes</div>';
@@ -911,20 +930,21 @@ function renderPainel(data) {
     var statusInfo = getStatusInfo(t.lastSeen);
     var barWidth = t.totalUps > 0 ? Math.max(4, (t.totalUps / sorted[0].totalUps) * 100) : 0;
     var teamGrades = t.services.filter(function(s) { return s.grade > 0; }).map(function(s) { return s.grade; });
-    var teamTotalGrade = teamGrades.length > 0 ? teamGrades.reduce(function(a, b) { return a + b; }, 0) : 0;
+    var teamTotalGradeCount = teamGrades.length;
 
     html += '<div class="ranking-item" onclick="openTeamModal(\'' + t.userId + '\')">' +
       '<div class="ranking-pos">' + medal + '</div>' +
       '<div class="badge badge-sm" style="background:' + color + ';">' + t.class + '</div>' +
       '<div class="ranking-info">' +
-      '<div class="ranking-name">' + escapeHtml(t.username) + '</div>' +
+      '<div class="ranking-name">' + escapeHtml(t.username) + (t.supervisor ? ' <span style="font-size:11px;color:var(--text-muted);font-weight:400;">(' + escapeHtml(t.supervisor) + ')</span>' : '') + '</div>' +
       '<div class="ranking-status ' + statusInfo.className + '"><span class="status-dot"></span><span class="status-label">' + statusInfo.label + '</span></div>' +
+      (t.goal_money > 0 ? '<div style="margin-top:4px;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;"><span style="font-size:10px;color:var(--text-muted);">Meta: ' + fmtMoney(t.goal_money) + '</span><span style="font-size:10px;font-weight:700;color:var(--money);">' + Math.min(100, Math.round((t.totalMoney / t.goal_money) * 100)) + '%</span></div><div style="width:100%;height:6px;background:var(--border);border-radius:3px;overflow:hidden;"><div style="height:100%;background:var(--money);border-radius:3px;width:' + Math.min(100, (t.totalMoney / t.goal_money) * 100) + '%;"></div></div></div>' : '') +
       '</div>' +
       '<div class="ranking-stats">' +
       '<div class="ranking-ups">' + t.totalUps + ' UPS</div>' +
       (t.totalMoney ? '<div class="ranking-money">' + fmtMoney(t.totalMoney) + '</div>' : '') +
       '<div class="ranking-count">' + t.count + ' servi\u00E7o' + (t.count !== 1 ? 's' : '') + '</div>' +
-      (teamTotalGrade > 0 ? '<div class="ranking-grade">Notas: ' + teamTotalGrade + '</div>' : '') +
+      (teamTotalGradeCount > 0 ? '<div class="ranking-grade">Notas: ' + teamTotalGradeCount + '</div>' : '') +
       '</div>' +
       '<div class="ranking-bar"><div class="ranking-bar-fill" style="width:' + barWidth + '%;background:' + color + ';"></div></div>' +
       '</div>';
@@ -948,7 +968,7 @@ function renderTeamsList(users) {
     container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">groups</span><p>Nenhuma equipe cadastrada</p></div>';
     return;
   }
-  var html = '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Nome</th><th>Status</th><th>Função</th><th>Localização</th><th>Ações</th></tr></thead><tbody>';
+  var html = '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Nome</th><th>Supervisor</th><th>Meta R$</th><th>Status</th><th>Função</th><th>Localização</th><th>Ações</th></tr></thead><tbody>';
   for (var i = 0; i < teams.length; i++) {
     var t = teams[i];
     var statusInfo = getStatusInfo(t.last_seen);
@@ -960,14 +980,18 @@ function renderTeamsList(users) {
     } else {
       locDisplay = '<span style="font-size:11px;color:var(--text-muted);">—</span>';
     }
+    var goalDisplay = t.goal_money > 0 ? fmtMoney(t.goal_money) : '<span style="color:var(--text-muted);">—</span>';
+    var supDisplay = t.supervisor ? escapeHtml(t.supervisor) : '<span style="color:var(--text-muted);">—</span>';
     html += '<tr>' +
       '<td style="font-weight:600;color:var(--text-muted);">#' + t.id.slice(-6) + '</td>' +
       '<td><strong>' + escapeHtml(t.username) + '</strong></td>' +
+      '<td>' + supDisplay + '</td>' +
+      '<td style="color:var(--money);font-weight:600;">' + goalDisplay + '</td>' +
       '<td>' + statusHtml + '</td>' +
       '<td><span style="background:var(--primary-bg);color:var(--primary);padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600;">' + t.role + '</span></td>' +
       '<td>' + locDisplay + '</td>' +
       '<td class="actions">' +
-      '<button class="btn btn-sm btn-outline" onclick="showResetPass(\'' + t.id + '\')"><span class="material-symbols-outlined">key</span> Senha</button>' +
+      '<button class="btn btn-sm btn-outline" onclick="editTeam(\'' + t.id + '\')"><span class="material-symbols-outlined">edit</span> Editar</button>' +
       '<button class="btn btn-sm btn-danger" onclick="deleteTeam(\'' + t.id + '\')"><span class="material-symbols-outlined">delete</span></button>' +
       '</td></tr>';
   }
@@ -982,6 +1006,9 @@ function captureLocationForTeam() {
 function createTeam() {
   var name = $('newTeamName').value.trim();
   var pass = $('newTeamPass').value.trim();
+  var supervisor = $('newTeamSupervisor').value.trim();
+  var goalRaw = $('newTeamGoal').value;
+  var goalMoney = parseFloat(goalRaw) || 0;
   if (!name || !pass) { showMsg('teamFormMsgAdmin', 'error', 'Preencha nome e senha da equipe'); return; }
   clearMsg('teamFormMsgAdmin');
 
@@ -1002,6 +1029,8 @@ function createTeam() {
     }
     var userData = {
       username: name, password: pass, role: 'equipe',
+      supervisor: supervisor || '',
+      goal_money: goalMoney,
       latitude: String(adminLocation.lat),
       longitude: String(adminLocation.lng),
       address: adminAddress || '',
@@ -1014,6 +1043,8 @@ function createTeam() {
       loading(false);
       $('newTeamName').value = '';
       $('newTeamPass').value = '';
+      $('newTeamSupervisor').value = '';
+      $('newTeamGoal').value = '';
       toast('Equipe criada com sucesso!', 'success');
       loadAllAdminData();
       adminLocation = null;
@@ -1055,6 +1086,61 @@ function showResetPass(id) {
     loading(false);
     toast('Erro: ' + err.message, 'error');
   });
+}
+
+function editTeam(id) {
+  loading(true);
+  fbOnce('users/' + id).then(function(user) {
+    loading(false);
+    if (!user) { toast('Equipe não encontrada', 'error'); return; }
+    $('editTeamId').value = id;
+    $('editTeamName').value = user.username || '';
+    $('editTeamSupervisor').value = user.supervisor || '';
+    $('editTeamGoal').value = user.goal_money > 0 ? user.goal_money : '';
+    $('editTeamPass').value = '';
+    clearMsg('editTeamMsg');
+    $('editTeamModal').style.display = 'flex';
+  }).catch(function(err) {
+    loading(false);
+    toast('Erro: ' + err.message, 'error');
+  });
+}
+
+function saveEditTeam() {
+  var id = $('editTeamId').value;
+  var name = $('editTeamName').value.trim();
+  var supervisor = $('editTeamSupervisor').value.trim();
+  var goalRaw = $('editTeamGoal').value;
+  var goalMoney = parseFloat(goalRaw) || 0;
+  var newPass = $('editTeamPass').value.trim();
+
+  if (!name) { showMsg('editTeamMsg', 'error', 'O nome da equipe é obrigatório'); return; }
+  clearMsg('editTeamMsg');
+
+  var updateData = {
+    username: name,
+    supervisor: supervisor || '',
+    goal_money: goalMoney
+  };
+
+  if (newPass && newPass.length >= 3) {
+    updateData.password = newPass;
+  }
+
+  loading(true);
+  fbUpdate('users/' + id, updateData).then(function() {
+    loading(false);
+    toast('Equipe atualizada com sucesso!', 'success');
+    closeEditTeamModal();
+    loadAllAdminData();
+  }).catch(function(err) {
+    loading(false);
+    showMsg('editTeamMsg', 'error', 'Erro: ' + err.message);
+  });
+}
+
+function closeEditTeamModal() {
+  $('editTeamModal').style.display = 'none';
 }
 
 // --- Catálogo de Serviços ---
@@ -1311,10 +1397,13 @@ function initMap() {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
       subdomains: 'abcd', maxZoom: 20
     }).addTo(map);
+    var terrainLayer = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://opentopomap.org">OpenTopoMap</a>', maxZoom: 17
+    });
     var weatherLayer = L.tileLayer('https://tile.openweathermap.org/map/temp_new/{z}/{x}/{y}.png?appid=' + OWM_API_KEY, {
       attribution: '&copy; <a href="https://openweathermap.org">OpenWeatherMap</a>', opacity: 0.6, maxZoom: 18
     });
-    L.control.layers(null, { 'Temperatura': weatherLayer }, { collapsed: true }).addTo(map);
+    L.control.layers(null, { 'Terreno': terrainLayer, 'Temperatura': weatherLayer }, { collapsed: true }).addTo(map);
     loadMapData();
   } catch (e) {
     console.error('Erro ao inicializar mapa:', e);
@@ -1438,12 +1527,30 @@ function openTeamModal(userId) {
     } else {
       addrEl.textContent = '—';
     }
+    var supLine = $('modalSupervisorLine');
+    if (user && user.supervisor) {
+      supLine.style.display = 'block';
+      $('modalSupervisorName').textContent = user.supervisor;
+    } else {
+      supLine.style.display = 'none';
+    }
     $('modalTotalUps').textContent = summary.totalUps;
     $('modalTotalMoney').textContent = fmtMoney(summary.totalMoney || 0);
     $('modalSrvCount').textContent = summary.count;
     var classEl = $('modalClass');
     classEl.textContent = summary.class;
     classEl.style.color = color;
+    var goalSection = $('modalGoalSection');
+    if (user && user.goal_money > 0) {
+      var goalPct = Math.min(100, Math.round((summary.totalMoney / user.goal_money) * 100));
+      goalSection.style.display = 'block';
+      $('modalGoalValue').textContent = fmtMoney(user.goal_money);
+      $('modalGoalPercent').textContent = goalPct + '%';
+      $('modalGoalBar').style.width = Math.min(100, (summary.totalMoney / user.goal_money) * 100) + '%';
+      $('modalGoalBar').style.background = goalPct >= 100 ? 'var(--success)' : goalPct >= 70 ? 'var(--warning)' : 'var(--money)';
+    } else {
+      goalSection.style.display = 'none';
+    }
     renderTeamDetails(summary.services);
     $('teamModal').style.display = 'flex';
   }).catch(function(err) {
@@ -1473,6 +1580,108 @@ function renderTeamDetails(services) {
   }
   html += '</tbody></table></div>';
   container.innerHTML = html;
+}
+
+// --- Supervisores ---
+function loadSupervisores() {
+  var start = $('adminStartDate').value;
+  var end = $('adminEndDate').value;
+  getAllTeamsSummaryForPeriod(start, end).then(function(data) {
+    renderSupervisores(data);
+  }).catch(function(err) {
+    console.error('Erro ao carregar supervisores:', err);
+  });
+}
+
+function renderSupervisores(data) {
+  var container = $('supervisoresContent');
+  if (!data || data.length === 0) {
+    container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">supervisor_account</span><p>Nenhuma equipe com supervisor cadastrado</p></div>';
+    return;
+  }
+  var supervisors = {};
+  data.forEach(function(t) {
+    var sup = t.supervisor || 'Sem Supervisor';
+    if (!supervisors[sup]) {
+      supervisors[sup] = { teams: [], totalUps: 0, totalMoney: 0, totalGoal: 0, totalServices: 0, classes: [] };
+    }
+    supervisors[sup].teams.push(t);
+    supervisors[sup].totalUps += t.totalUps;
+    supervisors[sup].totalMoney += t.totalMoney;
+    supervisors[sup].totalGoal += t.goal_money || 0;
+    supervisors[sup].totalServices += t.count;
+    supervisors[sup].classes.push(t.class);
+  });
+
+  var supNames = Object.keys(supervisors).sort(function(a, b) {
+    return supervisors[b].totalUps - supervisors[a].totalUps;
+  });
+
+  var html = '';
+  for (var i = 0; i < supNames.length; i++) {
+    var supName = supNames[i];
+    var sup = supervisors[supName];
+    var supId = 'sup_' + i;
+    var medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '#' + (i + 1);
+    var goalPct = sup.totalGoal > 0 ? Math.min(100, Math.round((sup.totalMoney / sup.totalGoal) * 100)) : 0;
+    var avgUps = sup.teams.length > 0 ? (sup.totalUps / sup.teams.length).toFixed(1) : 0;
+
+    html += '<div class="card" style="margin-bottom:12px;overflow:hidden;">';
+    html += '<div class="ranking-item" style="cursor:pointer;padding:16px 20px;margin:0;border:none;border-radius:0;background:transparent;" onclick="toggleSupervisor(\'' + supId + '\')">' +
+      '<div class="ranking-pos">' + medal + '</div>' +
+      '<div class="ranking-info">' +
+      '<div class="ranking-name" style="font-size:15px;">' + escapeHtml(supName) + ' <span style="font-size:12px;color:var(--text-muted);font-weight:400;vertical-align:middle;" id="supArrow_' + supId + '">▶</span></div>' +
+      '<div class="ranking-status" style="color:var(--text-muted);">' + sup.teams.length + ' equipe' + (sup.teams.length !== 1 ? 's' : '') + ' | Média: ' + avgUps + ' UPS/equipe</div>' +
+      (sup.totalGoal > 0 ? '<div style="margin-top:6px;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;"><span style="font-size:10px;color:var(--text-muted);">Meta: ' + fmtMoney(sup.totalGoal) + '</span><span style="font-size:10px;font-weight:700;color:var(--money);">' + goalPct + '%</span></div><div style="width:100%;height:6px;background:var(--border);border-radius:3px;overflow:hidden;"><div style="height:100%;background:var(--money);border-radius:3px;width:' + goalPct + '%;"></div></div></div>' : '') +
+      '</div>' +
+      '<div class="ranking-stats">' +
+      '<div class="ranking-ups">' + sup.totalUps + ' UPS</div>' +
+      '<div class="ranking-money">' + fmtMoney(sup.totalMoney) + '</div>' +
+      '<div class="ranking-count">' + sup.totalServices + ' serviço' + (sup.totalServices !== 1 ? 's' : '') + '</div>' +
+      '</div>' +
+      '</div>';
+
+    html += '<div id="' + supId + '" style="display:none;padding:0 14px 14px;border-top:1px solid var(--border-light);">';
+    html += '<div class="table-wrap"><table><thead><tr><th>Equipe</th><th>Classe</th><th>UPS</th><th>R$</th><th>Serviços</th><th>Meta</th><th>Progresso</th></tr></thead><tbody>';
+    sup.teams.sort(function(a, b) { return b.totalUps - a.totalUps; }).forEach(function(t) {
+      var teamGoalPct = t.goal_money > 0 ? Math.min(100, Math.round((t.totalMoney / t.goal_money) * 100)) : 0;
+      var teamColor = t.color || '#94a3b8';
+      html += '<tr style="cursor:pointer;" onclick="openTeamModal(\'' + t.userId + '\')">' +
+        '<td><strong>' + escapeHtml(t.username) + '</strong></td>' +
+        '<td><span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;background:' + teamColor + ';color:#fff;font-weight:800;font-size:12px;">' + t.class + '</span></td>' +
+        '<td style="font-weight:700;color:var(--primary);">' + t.totalUps + '</td>' +
+        '<td style="font-weight:600;color:var(--money);">' + fmtMoney(t.totalMoney) + '</td>' +
+        '<td>' + t.count + '</td>' +
+        '<td>' + (t.goal_money > 0 ? fmtMoney(t.goal_money) : '<span style="color:var(--text-muted);">—</span>') + '</td>' +
+        '<td style="min-width:120px;">';
+      if (t.goal_money > 0) {
+        html += '<div style="display:flex;align-items:center;gap:6px;"><div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;"><div style="height:100%;background:' + (teamGoalPct >= 100 ? 'var(--success)' : teamGoalPct >= 70 ? 'var(--warning)' : 'var(--money)') + ';border-radius:3px;width:' + teamGoalPct + '%;"></div></div><span style="font-size:11px;font-weight:700;min-width:30px;text-align:right;">' + teamGoalPct + '%</span></div>';
+      } else {
+        html += '<span style="color:var(--text-muted);font-size:11px;">Sem meta</span>';
+      }
+      html += '</td></tr>';
+    });
+    html += '</tbody></table></div></div>';
+    html += '</div>';
+  }
+
+  if (supNames.length === 0) {
+    html = '<div class="empty-state"><span class="material-symbols-outlined">supervisor_account</span><p>Nenhuma equipe com supervisor cadastrado</p></div>';
+  }
+  container.innerHTML = html;
+}
+
+function toggleSupervisor(supId) {
+  var el = $(supId);
+  var arrow = $('supArrow_' + supId);
+  if (!el) return;
+  if (el.style.display === 'none') {
+    el.style.display = 'block';
+    if (arrow) arrow.textContent = '▼';
+  } else {
+    el.style.display = 'none';
+    if (arrow) arrow.textContent = '▶';
+  }
 }
 
 // ===== GLOBAL ERROR CATCHER =====
