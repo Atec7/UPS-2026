@@ -494,7 +494,7 @@
   <div class="topbar">
     <div class="topbar-left">
       <div class="topbar-avatar"><span class="material-symbols-outlined">admin_panel_settings</span></div>
-      <h2>Administração</h2>
+      <h2>ACOMPANHAMENTO UPS TEMPO REAL - Informação e Performance</h2>
       <span class="topbar-info"><span class="material-symbols-outlined">calendar_today</span><span id="adminDate"></span></span>
     </div>
     <div class="topbar-right">
@@ -515,6 +515,7 @@
     <button class="nav-tab" data-tab="tabSupervisores"><span class="material-symbols-outlined">supervisor_account</span> Supervisores</button>
     <button class="nav-tab" data-tab="tabMapa"><span class="material-symbols-outlined">map</span> Mapa</button>
     <button class="nav-tab" data-tab="tabEstatisticas"><span class="material-symbols-outlined">insights</span> Estatísticas</button>
+    <button class="nav-tab" data-tab="tabAuditoria"><span class="material-symbols-outlined">fact_check</span> Auditoria</button>
   </div>
   <div class="tab-content active" id="tabPainel">
     <div class="card">
@@ -603,6 +604,34 @@
       <div id="statsContent"><div class="empty-state"><span class="material-symbols-outlined">hourglass_empty</span><p>Carregando...</p></div></div>
     </div>
   </div>
+  <div class="tab-content" id="tabAuditoria">
+    <div class="card">
+      <div class="card-title"><span class="material-symbols-outlined">fact_check</span> Auditoria de Lançamentos</div>
+      <p class="card-subtitle">Consulte e edite os lançamentos de atividade das equipes por período.</p>
+      <div class="form-row" style="margin-bottom:14px;">
+        <div class="form-group">
+          <label>Data Início</label>
+          <input type="date" id="auditoriaStartDate">
+        </div>
+        <div class="form-group">
+          <label>Data Fim</label>
+          <input type="date" id="auditoriaEndDate">
+        </div>
+        <div class="form-group" style="display:flex;align-items:flex-end;">
+          <button class="btn btn-primary" onclick="loadAuditoria()" style="width:100%;">
+            <span class="material-symbols-outlined">search</span> Consultar
+          </button>
+        </div>
+        <div class="form-group" style="display:flex;align-items:flex-end;">
+          <button class="btn btn-outline" onclick="setAuditoriaCurrentMonth()" style="width:100%;">
+            <span class="material-symbols-outlined">calendar_month</span> Mês Atual
+          </button>
+        </div>
+      </div>
+      <div id="auditoriaMsg" class="msg"></div>
+      <div id="auditoriaContent"><div class="empty-state"><span class="material-symbols-outlined">fact_check</span><p>Selecione um período e clique em Consultar</p></div></div>
+    </div>
+  </div>
 </div>
 
 <!-- ========== MODAL ========== -->
@@ -645,6 +674,83 @@
   <div class="celebration-card">
     <div class="celebration-title">🏆 CLASSE A! 🏆</div>
     <div id="celebrationDetails" class="celebration-details"></div>
+  </div>
+</div>
+
+<!-- ========== MODAL EDITAR LANÇAMENTO (AUDITORIA) ========== -->
+<div id="editServiceModal" class="modal-overlay" style="display:none;">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2><span class="material-symbols-outlined" style="font-size:20px;">edit_note</span> Editar Lançamento</h2>
+      <button class="modal-close-btn" onclick="closeEditServiceModal()"><span class="material-symbols-outlined">close</span></button>
+    </div>
+    <div class="modal-body">
+      <div id="editServiceMsg" class="msg"></div>
+      <input type="hidden" id="editServiceId">
+      <div class="form-row">
+        <div class="form-group">
+          <label>Equipe</label>
+          <select id="editServiceUserId"></select>
+        </div>
+        <div class="form-group">
+          <label>Tipo de Registro</label>
+          <select id="editServiceType">
+            <option value="miscellany">Miscelânea</option>
+            <option value="emergency">Emergência</option>
+            <option value="commercial">Comercial</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Número da Nota</label>
+          <input type="number" id="editServiceGrade" placeholder="Ex: 123" step="1" max="99999999">
+        </div>
+        <div class="form-group">
+          <label>Quantidade</label>
+          <input type="number" id="editServiceQty" placeholder="1" min="1" step="1">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Valor UPS Total</label>
+          <input type="number" id="editServiceUps" placeholder="0" min="0" step="0.5">
+        </div>
+        <div class="form-group">
+          <label>Valor R$ Total</label>
+          <input type="number" id="editServiceMoney" placeholder="0,00" min="0" step="0.01">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Nome do Serviço</label>
+        <input type="text" id="editServiceName" placeholder="Nome do serviço">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Data (automática)</label>
+          <input type="date" id="editServiceDate" readonly style="background:var(--bg);color:var(--text-secondary);">
+        </div>
+        <div class="form-group">
+          <label>Horário (automático)</label>
+          <input type="time" id="editServiceTime" readonly style="background:var(--bg);color:var(--text-secondary);">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Localização (automática)</label>
+        <div id="editServiceLocation" style="font-size:12px;color:var(--text-secondary);padding:8px 12px;border:1.5px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);min-height:38px;display:flex;align-items:center;gap:8px;">
+          <span class="material-symbols-outlined" style="font-size:16px;color:var(--text-muted);">location_on</span>
+          <span id="editServiceLocationText">Capturando...</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        <button class="btn btn-success" onclick="saveEditService()" style="flex:1;">
+          <span class="material-symbols-outlined">save</span> Salvar Alterações
+        </button>
+        <button class="btn btn-ghost" onclick="closeEditServiceModal()" style="flex:1;">
+          Cancelar
+        </button>
+      </div>
+    </div>
   </div>
 </div>
 

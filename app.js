@@ -257,20 +257,81 @@ function heartbeat() {
 }
 
 var watchId = null;
+var currentTeamLat = '';
+var currentTeamLng = '';
+var currentTeamAddress = '';
+var currentTeamCity = '';
+var lastLocationHistorySave = 0;
 
 function startLocationTracking() {
   if (!navigator.geolocation) return;
   if (watchId !== null) return;
   watchId = navigator.geolocation.watchPosition(function(pos) {
     if (!currentUser) return;
+    var lat = pos.coords.latitude;
+    var lng = pos.coords.longitude;
+    currentTeamLat = lat;
+    currentTeamLng = lng;
     fbUpdate('users/' + currentUser.id, {
-      latitude: pos.coords.latitude,
-      longitude: pos.coords.longitude,
+      latitude: lat,
+      longitude: lng,
       last_seen: nowTimestamp()
     }).catch(function(err) {});
+    var now = Date.now();
+    if (now - lastLocationHistorySave > 60000) {
+      lastLocationHistorySave = now;
+      saveLocationHistoryPoint(currentUser.id, lat, lng);
+    }
   }, function(err) {
     console.warn('Geolocation error:', err.message);
   }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 300000 });
+}
+
+function saveLocationHistoryPoint(userId, lat, lng) {
+  var point = {
+    lat: lat,
+    lng: lng,
+    timestamp: nowTimestamp(),
+    date: todayStr()
+  };
+  reverseGeocode(lat, lng, function(addr) {
+    point.address = addr;
+    var cityParts = addr.split(',');
+    point.city = cityParts.length > 1 ? cityParts[1].trim() : cityParts[0].trim();
+    currentTeamAddress = addr;
+    currentTeamCity = point.city;
+    fbPush('location_history/' + userId + '/' + todayStr(), point).catch(function(err) {});
+  });
+}
+
+function captureTeamLocationForService(callback) {
+  var lat = currentTeamLat;
+  var lng = currentTeamLng;
+  if (!lat || !lng) {
+    if (!navigator.geolocation) {
+      callback('', '', '', '');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(function(pos) {
+      currentTeamLat = pos.coords.latitude;
+      currentTeamLng = pos.coords.longitude;
+      reverseGeocode(currentTeamLat, currentTeamLng, function(addr) {
+        currentTeamAddress = addr;
+        currentTeamCity = (addr.split(',')[1] || addr.split(',')[0] || '').trim();
+        callback(currentTeamLat, currentTeamLng, currentTeamCity, currentTeamAddress);
+      });
+    }, function(err) {
+      callback('', '', '', '');
+    }, { enableHighAccuracy: true, timeout: 8000 });
+  } else if (currentTeamAddress) {
+    callback(lat, lng, currentTeamCity, currentTeamAddress);
+  } else {
+    reverseGeocode(lat, lng, function(addr) {
+      currentTeamAddress = addr;
+      currentTeamCity = (addr.split(',')[1] || addr.split(',')[0] || '').trim();
+      callback(lat, lng, currentTeamCity, currentTeamAddress);
+    });
+  }
 }
 
 function stopLocationTracking() {
@@ -332,8 +393,8 @@ function loadTeamCatalog() {
       var svc = arr[i];
       var div = document.createElement('div');
       div.className = 'activity-item';
-      div.innerHTML = '<input type="checkbox" id="chk_' + svc.id + '" onchange="onTeamActivityToggle(\'' + svc.id + '\')">' +
-                      '<label for="chk_' + svc.id + '">' + escapeHtml(svc.name) + '</label>';
+      div.innerHTML = '<input type="radio" name="teamActivityRadio" id="rad_' + svc.id + '" value="' + svc.id + '" onchange="onTeamActivityToggle(\'' + svc.id + '\')">' +
+                      '<label for="rad_' + svc.id + '">' + escapeHtml(svc.name) + ' <span style="font-size:10px;color:var(--text-muted);">(' + svc.ups_value + ' UPS)</span></label>';
       container.appendChild(div);
     }
   });
@@ -345,19 +406,16 @@ function onTeamEntryTypeChange() {
 }
 
 function onTeamActivityToggle(svcId) {
-  var isChecked = $('chk_' + svcId).checked;
   var qtyContainer = $('teamDynamicQuantities');
-  if (isChecked) {
-    var svc = teamCatalogCache.find(function(s) { return s.id == svcId; });
+  qtyContainer.innerHTML = '';
+  var svc = teamCatalogCache.find(function(s) { return s.id == svcId; });
+  if (svc) {
     var div = document.createElement('div');
     div.className = 'qty-input-row';
     div.id = 'qty_row_' + svcId;
     div.innerHTML = '<label>' + escapeHtml(svc.name) + '</label>' +
                     '<input type="number" id="qty_' + svcId + '" value="1" min="1" oninput="onTeamGradeChange()">';
     qtyContainer.appendChild(div);
-  } else {
-    var row = $('qty_row_' + svcId);
-    if (row) row.remove();
   }
   onTeamGradeChange();
 }
@@ -377,31 +435,22 @@ function onTeamGradeChange() {
   var totalUps = 0;
   var totalMoney = 0;
   var totalQty = 0;
-  teamCatalogCache.forEach(function(svc) {
-    var chk = $('chk_' + svc.id);
-    if (chk && chk.checked) {
-      var qty = parseFloat($('qty_' + svc.id).value) || 1;
-      totalQty += qty;
-    }
-  });
-  if (type === 'miscellany') {
-    totalUps = 5.6;
-  } else {
-    teamCatalogCache.forEach(function(svc) {
-      var chk = $('chk_' + svc.id);
-      if (chk && chk.checked) {
-        var qty = parseFloat($('qty_' + svc.id).value) || 1;
-        totalUps += qty * (svc.ups_value || 0);
+  var selectedRadio = document.querySelector('input[name="teamActivityRadio"]:checked');
+  if (selectedRadio) {
+    var svcId = selectedRadio.value;
+    var svc = teamCatalogCache.find(function(s) { return s.id == svcId; });
+    if (svc) {
+      var qtyInput = $('qty_' + svcId);
+      var qty = qtyInput ? parseFloat(qtyInput.value) || 1 : 1;
+      totalQty = qty;
+      if (type !== 'miscellany') {
+        totalUps = qty * (svc.ups_value || 0);
+      } else {
+        totalUps = 5.6;
       }
-    });
-  }
-  teamCatalogCache.forEach(function(svc) {
-    var chk = $('chk_' + svc.id);
-    if (chk && chk.checked) {
-      var qty = parseFloat($('qty_' + svc.id).value) || 1;
-      totalMoney += qty * (svc.money_value || 0);
+      totalMoney = qty * (svc.money_value || 0);
     }
-  });
+  }
   if (totalUps > 0 || type === 'emergency' || type === 'commercial') {
     calc.style.display = 'flex';
     $('teamCalcUps').textContent = fmtUps(totalUps);
@@ -418,33 +467,51 @@ function addTeamService() {
   var raw = $('teamGrade').value;
   var nota = parseInt(raw);
   if (isNaN(nota)) { showMsg('teamFormMsg', 'error', 'Informe uma nota válida'); return; }
-  var selectedSvcs = [];
-  teamCatalogCache.forEach(function(svc) {
-    var chk = $('chk_' + svc.id);
-    if (chk && chk.checked) {
-      var qty = parseFloat($('qty_' + svc.id).value) || 1;
-      selectedSvcs.push({ svc: svc, qty: qty });
-    }
-  });
-  if (selectedSvcs.length === 0) { showMsg('teamFormMsg', 'error', 'Selecione ao menos uma atividade'); return; }
-  loading(true);
+  var selectedRadio = document.querySelector('input[name="teamActivityRadio"]:checked');
+  if (!selectedRadio) { showMsg('teamFormMsg', 'error', 'Selecione exatamente uma atividade'); return; }
+  var svcId = selectedRadio.value;
+  var svc = teamCatalogCache.find(function(s) { return s.id == svcId; });
+  if (!svc) { showMsg('teamFormMsg', 'error', 'Atividade não encontrada'); return; }
+  var qtyInput = $('qty_' + svcId);
+  var qty = qtyInput ? parseFloat(qtyInput.value) || 1 : 1;
   var totalUps;
   var totalMoney = 0;
   if (type === 'miscellany') {
     totalUps = 5.6;
   } else {
-    totalUps = selectedSvcs.reduce(function(sum, s) { return sum + s.qty * (s.svc.ups_value || 0); }, 0);
+    totalUps = qty * (svc.ups_value || 0);
   }
-  totalMoney = selectedSvcs.reduce(function(sum, s) { return sum + s.qty * (s.svc.money_value || 0); }, 0);
-  submitNewEntry(type, nota, selectedSvcs, totalUps, totalMoney);
+  totalMoney = qty * (svc.money_value || 0);
+
+  loading(true);
+  fbOnce('services').then(function(allServices) {
+    var arr = toArray(allServices);
+    var duplicateGrade = arr.some(function(s) {
+      return s.user_id === currentUser.id && s.grade === nota && s.grade > 0;
+    });
+    if (duplicateGrade) {
+      loading(false);
+      showMsg('teamFormMsg', 'error', 'Esta nota (' + nota + ') já foi utilizada por esta equipe. Informe um número de nota diferente.');
+      return;
+    }
+    captureTeamLocationForService(function(lat, lng, city, address) {
+      var selectedSvcs = [{ svc: svc, qty: qty }];
+      submitNewEntry(type, nota, selectedSvcs, totalUps, totalMoney, lat, lng, city, address);
+    });
+  }).catch(function(err) {
+    loading(false);
+    showMsg('teamFormMsg', 'error', 'Erro ao validar nota: ' + err.message);
+  });
 }
 
-function submitNewEntry(type, grade, selectedSvcs, upsValue, moneyValue) {
+function submitNewEntry(type, grade, selectedSvcs, upsValue, moneyValue, lat, lng, city, address) {
   var svcNames = selectedSvcs.map(function(s) { return s.svc.name; }).join(', ');
   var totalQty = selectedSvcs.reduce(function(sum, s) { return sum + s.qty; }, 0);
   var upsPerUnit = totalQty > 0 ? upsValue / totalQty : upsValue;
   var moneyPerUnit = totalQty > 0 && moneyValue > 0 ? moneyValue / totalQty : 0;
   var typeLabel = type === 'miscellany' ? 'Miscelânea' : (type === 'emergency' ? 'Emergência' : (type === 'commercial' ? 'Comercial' : ''));
+  var now = new Date();
+  var timeStr = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0') + ':' + String(now.getSeconds()).padStart(2, '0');
   var serviceData = {
     user_id: currentUser.id,
     service_name: typeLabel + ': ' + svcNames,
@@ -457,16 +524,21 @@ function submitNewEntry(type, grade, selectedSvcs, upsValue, moneyValue) {
     type: type,
     activities: selectedSvcs.map(function(s) { return { id: s.svc.id, name: s.svc.name, qty: s.qty }; }),
     date: todayStr(),
-    created_at: nowTimestamp()
+    created_at: nowTimestamp(),
+    latitude: lat || '',
+    longitude: lng || '',
+    city: city || '',
+    address: address || '',
+    time: timeStr,
+    edited_by: '',
+    edited_at: null
   };
   fbPush('services', serviceData).then(function(key) {
     loading(false);
     $('teamGrade').value = '';
     $('teamEntryType').value = 'miscellany';
-    teamCatalogCache.forEach(function(svc) {
-      var chk = $('chk_' + svc.id);
-      if (chk) chk.checked = false;
-    });
+    var radios = document.querySelectorAll('input[name="teamActivityRadio"]');
+    for (var i = 0; i < radios.length; i++) radios[i].checked = false;
     $('teamDynamicQuantities').innerHTML = '';
     toast('Registro adicionado!', 'success');
     refreshTeamView();
@@ -784,9 +856,14 @@ function formatService(s) {
     grade: s.grade || 0,
     latitude: s.latitude || '',
     longitude: s.longitude || '',
+    city: s.city || '',
+    address: s.address || '',
+    time: s.time || '',
     date: s.date,
     type: s.type || 'catalog',
-    activities: s.activities || []
+    activities: s.activities || [],
+    editedBy: s.edited_by || '',
+    editedAt: s.edited_at || null
   };
 }
 
@@ -852,6 +929,9 @@ function initTabs() {
       }
       if (tabId === 'tabSupervisores') {
         loadSupervisores();
+      }
+      if (tabId === 'tabAuditoria') {
+        initAuditoria();
       }
     });
   }
@@ -1682,6 +1762,222 @@ function toggleSupervisor(supId) {
     el.style.display = 'none';
     if (arrow) arrow.textContent = '▶';
   }
+}
+
+// --- Auditoria ---
+var auditoriaUsersCache = [];
+
+function initAuditoria() {
+  var now = new Date();
+  var firstDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-01';
+  var lastDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()).padStart(2, '0');
+  if (!$('auditoriaStartDate').value) $('auditoriaStartDate').value = firstDay;
+  if (!$('auditoriaEndDate').value) $('auditoriaEndDate').value = lastDay;
+  fbOnce('users').then(function(users) {
+    auditoriaUsersCache = toArray(users).filter(function(u) { return u.role !== 'admin'; });
+  });
+}
+
+function setAuditoriaCurrentMonth() {
+  var now = new Date();
+  var firstDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-01';
+  var lastDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()).padStart(2, '0');
+  $('auditoriaStartDate').value = firstDay;
+  $('auditoriaEndDate').value = lastDay;
+  loadAuditoria();
+}
+
+function loadAuditoria() {
+  var start = $('auditoriaStartDate').value;
+  var end = $('auditoriaEndDate').value;
+  if (!start || !end) {
+    showMsg('auditoriaMsg', 'error', 'Selecione o período');
+    return;
+  }
+  if (start > end) {
+    showMsg('auditoriaMsg', 'error', 'Data início deve ser anterior à data fim');
+    return;
+  }
+  clearMsg('auditoriaMsg');
+  loading(true);
+  Promise.all([fbOnce('services'), fbOnce('users'), fbOnce('catalog_services')]).then(function(results) {
+    loading(false);
+    var allServices = toArray(results[0]);
+    var users = toArray(results[1]);
+    var catalog = toArray(results[2]);
+    auditoriaUsersCache = users.filter(function(u) { return u.role !== 'admin'; });
+    var userMap = {};
+    users.forEach(function(u) { userMap[u.id] = u.username; });
+    var filtered = allServices.filter(function(s) {
+      return s.date >= start && s.date <= end;
+    });
+    filtered.sort(function(a, b) {
+      if (a.date === b.date) return (a.created_at || 0) - (b.created_at || 0);
+      return a.date > b.date ? -1 : 1;
+    });
+    renderAuditoria(filtered, userMap, catalog);
+  }).catch(function(err) {
+    loading(false);
+    showMsg('auditoriaMsg', 'error', 'Erro: ' + err.message);
+  });
+}
+
+function renderAuditoria(services, userMap, catalog) {
+  var container = $('auditoriaContent');
+  if (!services || services.length === 0) {
+    container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">fact_check</span><p>Nenhum lançamento encontrado no período</p></div>';
+    return;
+  }
+  var totalUps = services.reduce(function(s, sv) { return s + (sv.ups_value || 0); }, 0);
+  var totalMoney = services.reduce(function(s, sv) { return s + (sv.total_money || 0); }, 0);
+  var html = '<div class="stats-overview" style="margin-bottom:12px;">' +
+    '<div class="stat-box"><span class="stat-box-icon services"><span class="material-symbols-outlined">assignment</span></span><div><div class="stat-box-value">' + services.length + '</div><div class="stat-box-label">Lançamentos</div></div></div>' +
+    '<div class="stat-box"><span class="stat-box-icon ups"><span class="material-symbols-outlined">trending_up</span></span><div><div class="stat-box-value">' + totalUps + '</div><div class="stat-box-label">Total UPS</div></div></div>' +
+    '<div class="stat-box"><span class="stat-box-icon money"><span class="material-symbols-outlined">payments</span></span><div><div class="stat-box-value">' + fmtMoney(totalMoney) + '</div><div class="stat-box-label">Total R$</div></div></div>' +
+    '</div>';
+  html += '<div class="table-wrap"><table><thead><tr>' +
+    '<th>Data</th><th>Equipe</th><th>Serviço</th><th>Tipo</th><th class="num">Qtd</th><th class="num">UPS</th><th class="num">R$</th><th class="num">Nota</th><th>Ações</th>' +
+    '</tr></thead><tbody>';
+  for (var i = 0; i < services.length; i++) {
+    var s = services[i];
+    var teamName = userMap[s.user_id] || 'Desconhecido';
+    var typeLabel = s.type === 'miscellany' ? 'Miscelânea' : (s.type === 'emergency' ? 'Emergência' : (s.type === 'commercial' ? 'Comercial' : s.type || ''));
+    var timeDisplay = s.time || '';
+    html += '<tr>' +
+      '<td style="white-space:nowrap;font-size:12px;">' + formatDateBr(s.date) + (timeDisplay ? ' ' + timeDisplay : '') + '</td>' +
+      '<td><strong>' + escapeHtml(teamName) + '</strong></td>' +
+      '<td style="font-weight:600;font-size:12px;">' + escapeHtml(s.service_name || '') + '</td>' +
+      '<td style="font-size:12px;">' + typeLabel + '</td>' +
+      '<td class="num">' + (s.quantity || 1) + '</td>' +
+      '<td class="num" style="font-weight:700;color:var(--primary);">' + fmtUps(s.ups_value || 0) + '</td>' +
+      '<td class="num" style="font-weight:600;color:var(--money);">' + fmtMoney(s.total_money || 0) + '</td>' +
+      '<td class="num">' + (s.grade > 0 ? s.grade : '-') + '</td>' +
+      '<td class="actions">' +
+      '<button class="btn btn-sm btn-outline" onclick="editAuditoriaService(\'' + s.id + '\')"><span class="material-symbols-outlined">edit</span></button>' +
+      '<button class="btn btn-sm btn-danger" onclick="deleteAuditoriaService(\'' + s.id + '\')"><span class="material-symbols-outlined">delete</span></button>' +
+      '</td></tr>';
+  }
+  html += '</tbody></table></div>';
+  container.innerHTML = html;
+}
+
+function editAuditoriaService(serviceId) {
+  loading(true);
+  Promise.all([fbOnce('services/' + serviceId), fbOnce('users')]).then(function(results) {
+    loading(false);
+    var service = results[0];
+    if (!service) { toast('Lançamento não encontrado', 'error'); return; }
+    var users = toArray(results[1]).filter(function(u) { return u.role !== 'admin'; });
+    $('editServiceId').value = serviceId;
+    var userSelect = $('editServiceUserId');
+    userSelect.innerHTML = '';
+    for (var i = 0; i < users.length; i++) {
+      var opt = document.createElement('option');
+      opt.value = users[i].id;
+      opt.textContent = users[i].username;
+      if (users[i].id === service.user_id) opt.selected = true;
+      userSelect.appendChild(opt);
+    }
+    $('editServiceType').value = service.type || 'miscellany';
+    $('editServiceGrade').value = service.grade || '';
+    $('editServiceQty').value = service.quantity || 1;
+    $('editServiceUps').value = service.ups_value || 0;
+    $('editServiceMoney').value = service.total_money || 0;
+    $('editServiceName').value = service.service_name || '';
+    var now = new Date();
+    $('editServiceDate').value = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+    $('editServiceTime').value = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0') + ':' + String(now.getSeconds()).padStart(2, '0');
+    $('editServiceLocationText').textContent = 'Capturando localização...';
+    clearMsg('editServiceMsg');
+    $('editServiceModal').style.display = 'flex';
+    window._editServiceLat = '';
+    window._editServiceLng = '';
+    window._editServiceCity = '';
+    window._editServiceAddress = '';
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(function(pos) {
+        window._editServiceLat = pos.coords.latitude;
+        window._editServiceLng = pos.coords.longitude;
+        reverseGeocode(pos.coords.latitude, pos.coords.longitude, function(addr) {
+          window._editServiceAddress = addr;
+          window._editServiceCity = (addr.split(',')[1] || addr.split(',')[0] || '').trim();
+          $('editServiceLocationText').textContent = addr;
+        });
+      }, function(err) {
+        $('editServiceLocationText').textContent = 'Não foi possível obter localização';
+      }, { enableHighAccuracy: true, timeout: 10000 });
+    }
+  }).catch(function(err) {
+    loading(false);
+    toast('Erro: ' + err.message, 'error');
+  });
+}
+
+function saveEditService() {
+  var id = $('editServiceId').value;
+  var userId = $('editServiceUserId').value;
+  var type = $('editServiceType').value;
+  var grade = parseInt($('editServiceGrade').value) || 0;
+  var qty = parseInt($('editServiceQty').value) || 1;
+  var ups = parseFloat($('editServiceUps').value) || 0;
+  var money = parseFloat($('editServiceMoney').value) || 0;
+  var serviceName = $('editServiceName').value.trim();
+  var date = $('editServiceDate').value;
+  var time = $('editServiceTime').value;
+
+  if (!userId) { showMsg('editServiceMsg', 'error', 'Selecione uma equipe'); return; }
+  if (!serviceName) { showMsg('editServiceMsg', 'error', 'Informe o nome do serviço'); return; }
+
+  var upsPerUnit = qty > 0 ? ups / qty : ups;
+  var moneyPerUnit = qty > 0 && money > 0 ? money / qty : 0;
+
+  var updateData = {
+    user_id: userId,
+    type: type,
+    grade: grade,
+    quantity: qty,
+    ups_value: ups,
+    total_money: money,
+    ups_per_unit: upsPerUnit,
+    money_per_unit: moneyPerUnit,
+    service_name: serviceName,
+    date: date,
+    time: time,
+    latitude: window._editServiceLat || '',
+    longitude: window._editServiceLng || '',
+    city: window._editServiceCity || '',
+    address: window._editServiceAddress || '',
+    edited_by: currentUser ? currentUser.username : '',
+    edited_at: nowTimestamp()
+  };
+
+  loading(true);
+  fbUpdate('services/' + id, updateData).then(function() {
+    loading(false);
+    toast('Lançamento atualizado com sucesso!', 'success');
+    closeEditServiceModal();
+    loadAuditoria();
+  }).catch(function(err) {
+    loading(false);
+    showMsg('editServiceMsg', 'error', 'Erro: ' + err.message);
+  });
+}
+
+function deleteAuditoriaService(serviceId) {
+  if (!confirm('Excluir este lançamento? Esta ação não pode ser desfeita.')) return;
+  loading(true);
+  fbRemove('services/' + serviceId).then(function() {
+    loading(false);
+    toast('Lançamento excluído', 'info');
+    loadAuditoria();
+  }).catch(function(err) {
+    loading(false);
+    toast('Erro: ' + err.message, 'error');
+  });
+}
+
+function closeEditServiceModal() {
+  $('editServiceModal').style.display = 'none';
 }
 
 // ===== GLOBAL ERROR CATCHER =====
