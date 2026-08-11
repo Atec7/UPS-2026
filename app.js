@@ -1,6 +1,10 @@
 // ===== FIREBASE CONFIG =====
 var DB_BASE_URL = 'https://babearia-jhosuan-default-rtdb.firebaseio.com';
 
+// Versão atual do app. Ao publicar uma nova versão, atualize ESTE valor,
+// o VERSION em sw.js e o "version" em version.json (devem ser iguais).
+var APP_VERSION = '1.1.0';
+
 // ===== UTILITIES =====
 var currentUser = null;
 var map = null;
@@ -81,41 +85,27 @@ function fmtMoney(v) {
   return 'R$ ' + Number(v).toFixed(2).replace('.', ',');
 }
 
-// ===== FIREBASE HELPERS (REST API) =====
+// ===== FIREBASE HELPERS (REST API + OFFLINE) =====
+// Todas as chamadas passam pelo OfflineDB (db.js): leem do espelho local
+// quando offline e enfileiram escritas para sincronizar quando houver rede.
 function fbUrl(path) {
   return DB_BASE_URL + (path ? '/' + path : '') + '.json';
 }
 
 function fbOnce(path) {
-  return fetch(fbUrl(path)).then(function(r) {
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    return r.json();
-  });
+  return OfflineDB.read(path);
 }
 
 function fbPush(path, data) {
-  return fetch(fbUrl(path), { method: 'POST', body: JSON.stringify(data) }).then(function(r) {
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    return r.json();
-  }).then(function(resp) {
-    var key = resp.name;
-    data.id = key;
-    return key;
-  });
+  return OfflineDB.push(path, data);
 }
 
 function fbUpdate(path, data) {
-  return fetch(fbUrl(path), { method: 'PATCH', body: JSON.stringify(data) }).then(function(r) {
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    return r.json();
-  });
+  return OfflineDB.update(path, data);
 }
 
 function fbRemove(path) {
-  return fetch(fbUrl(path), { method: 'DELETE' }).then(function(r) {
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    return r.json();
-  });
+  return OfflineDB.remove(path);
 }
 
 function toArray(obj) {
@@ -137,6 +127,8 @@ function nowTimestamp() {
 function seedData() {
   return fbOnce('_initialized').then(function(init) {
     if (init) return;
+    // offline sem dados locais: não tenta criar seed (evita conflitos)
+    if (!navigator.onLine) return;
     var promises = [];
     promises.push(fbPush('users', {
       username: 'admin', password: 'admin123', role: 'admin',
@@ -180,7 +172,7 @@ function doLogin() {
     for (var i = 0; i < keys.length; i++) {
       var u = users[keys[i]];
       if (u.username === username && u.password === password) {
-        found = { id: keys[i], username: u.username, role: u.role };
+        found = { id: keys[i], username: u.username, role: u.role, shift_start: u.shift_start || '', shift_end: u.shift_end || '' };
         break;
       }
     }
@@ -253,7 +245,7 @@ function initTeamView() {
 
 function heartbeat() {
   if (!currentUser) return;
-  fbUpdate('users/' + currentUser.id, { last_seen: nowTimestamp() }).catch(function(err) {});
+  OfflineDB.bestEffortUpdate('users/' + currentUser.id, { last_seen: nowTimestamp() });
 }
 
 var watchId = null;
@@ -272,11 +264,11 @@ function startLocationTracking() {
     var lng = pos.coords.longitude;
     currentTeamLat = lat;
     currentTeamLng = lng;
-    fbUpdate('users/' + currentUser.id, {
+    OfflineDB.bestEffortUpdate('users/' + currentUser.id, {
       latitude: lat,
       longitude: lng,
       last_seen: nowTimestamp()
-    }).catch(function(err) {});
+    });
     var now = Date.now();
     if (now - lastLocationHistorySave > 60000) {
       lastLocationHistorySave = now;
@@ -300,7 +292,7 @@ function saveLocationHistoryPoint(userId, lat, lng) {
     point.city = cityParts.length > 1 ? cityParts[1].trim() : cityParts[0].trim();
     currentTeamAddress = addr;
     currentTeamCity = point.city;
-    fbPush('location_history/' + userId + '/' + todayStr(), point).catch(function(err) {});
+    OfflineDB.bestEffortPush('location_history/' + userId + '/' + todayStr(), point);
   });
 }
 
@@ -542,7 +534,8 @@ function submitNewEntry(type, grade, selectedSvcs, upsValue, moneyValue, lat, ln
     $('teamDynamicQuantities').innerHTML = '';
     toast('Registro adicionado!', 'success');
     refreshTeamView();
-    return fbUpdate('users/' + currentUser.id, { last_seen: nowTimestamp() });
+    updateSyncStatus();
+    return OfflineDB.bestEffortUpdate('users/' + currentUser.id, { last_seen: nowTimestamp() });
   }).catch(function(err) {
     loading(false);
     showMsg('teamFormMsg', 'error', 'Erro: ' + err.message);
@@ -577,7 +570,8 @@ function submitService(svc, qty, grade, totalUps, totalMoney, lat, lng) {
     if (calc) calc.style.display = 'none';
     toast('Serviço adicionado!', 'success');
     refreshTeamView();
-    return fbUpdate('users/' + currentUser.id, { last_seen: nowTimestamp() });
+    updateSyncStatus();
+    return OfflineDB.bestEffortUpdate('users/' + currentUser.id, { last_seen: nowTimestamp() });
   }).catch(function(err) {
     loading(false);
     showMsg('teamFormMsg', 'error', 'Erro: ' + err.message);
@@ -589,6 +583,8 @@ function refreshTeamView() {
   getTeamSummary(currentUser.id, todayStr(), todayStr()).then(function(summary) {
     renderTeamSummary(summary);
     renderTeamServices(summary.services);
+    lastShift = { shift_start: summary.shift_start, shift_end: summary.shift_end };
+    renderTeamShift();
   }).catch(function(err) {
     console.error('Erro ao atualizar:', err);
   });
@@ -654,12 +650,92 @@ function deleteService(serviceId) {
   loading(true);
   fbRemove('services/' + serviceId).then(function() {
     loading(false);
-    toast('Servi\u00E7o removido', 'info');
+    toast('Serviço removido', 'info');
+    updateSyncStatus();
     refreshTeamView();
   }).catch(function(err) {
     loading(false);
     toast('Erro: ' + err.message, 'error');
   });
+}
+
+// ===== TURNO (HORÁRIO DA EQUIPE) =====
+var lastShift = null;
+
+function getShiftProgress(user) {
+  var start = user && user.shift_start;
+  var end = user && user.shift_end;
+  if (!start || !end) return { enabled: false };
+  var sp = start.split(':').map(Number);
+  var ep = end.split(':').map(Number);
+  if (isNaN(sp[0]) || isNaN(sp[1]) || isNaN(ep[0]) || isNaN(ep[1])) return { enabled: false };
+  var now = new Date();
+  var startMs = new Date(now.getFullYear(), now.getMonth(), now.getDate(), sp[0], sp[1]).getTime();
+  var endMs = new Date(now.getFullYear(), now.getMonth(), now.getDate(), ep[0], ep[1]).getTime();
+  if (endMs <= startMs) endMs += 86400000;
+  var nowMs = now.getTime();
+  var result = { enabled: true, start: start, end: end, pct: 0 };
+  if (nowMs < startMs) {
+    result.status = 'antes';
+    result.label = 'Início às ' + start;
+    result.pct = 0;
+  } else if (nowMs > endMs) {
+    result.status = 'depois';
+    result.label = 'Turno encerrado';
+    result.pct = 100;
+  } else {
+    var total = endMs - startMs;
+    var elapsed = nowMs - startMs;
+    result.status = 'durante';
+    result.pct = Math.min(100, Math.max(0, Math.round((elapsed / total) * 100)));
+    result.remaining = endMs - nowMs;
+    result.label = 'Faltam ' + formatDuration(result.remaining);
+  }
+  return result;
+}
+
+function formatDuration(ms) {
+  var totalMin = Math.max(0, Math.round(ms / 60000));
+  var h = Math.floor(totalMin / 60);
+  var m = totalMin % 60;
+  if (h > 0) return h + 'h' + (m > 0 ? ' ' + m + 'min' : '');
+  return m + 'min';
+}
+
+function shiftColor(sp) {
+  if (sp.status === 'durante') {
+    if (sp.pct >= 85) return 'var(--danger)';
+    if (sp.pct >= 60) return 'var(--warning)';
+    return 'var(--primary)';
+  }
+  return 'var(--text-muted)';
+}
+
+function renderTeamShift() {
+  var section = $('teamShiftSection');
+  if (!section) return;
+  var sp = getShiftProgress(lastShift || currentUser);
+  if (!sp.enabled) { section.style.display = 'none'; return; }
+  section.style.display = 'block';
+  $('teamShiftTimes').textContent = sp.start + ' – ' + sp.end;
+  $('teamShiftLabel').textContent = sp.label;
+  var bar = $('teamShiftBar');
+  bar.style.width = sp.pct + '%';
+  bar.style.background = shiftColor(sp);
+}
+
+function shiftMiniBar(user) {
+  var sp = getShiftProgress(user);
+  if (!sp.enabled) return '';
+  var color = shiftColor(sp);
+  return '<div style="margin-top:4px;">' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;">' +
+    '<span style="font-size:10px;color:var(--text-muted);">Turno: ' + sp.start + ' – ' + sp.end + '</span>' +
+    '<span style="font-size:10px;font-weight:700;color:' + color + ';">' + sp.label + '</span>' +
+    '</div>' +
+    '<div style="width:100%;height:6px;background:var(--border);border-radius:3px;overflow:hidden;">' +
+    '<div style="height:100%;background:' + color + ';border-radius:3px;width:' + sp.pct + '%;"></div>' +
+    '</div></div>';
 }
 
 // ===== DATA FUNCTIONS =====
@@ -678,6 +754,8 @@ function getTeamSummary(userId, startDate, endDate) {
     return {
       userId: userId, startDate: startDate, endDate: endDate,
       goal_money: (userData && userData.goal_money) || 0,
+      shift_start: (userData && userData.shift_start) || '',
+      shift_end: (userData && userData.shift_end) || '',
       services: services, totalUps: totalUps, totalMoney: totalMoney,
       class: classInfo.class, color: classInfo.color, count: services.length
     };
@@ -700,6 +778,8 @@ function getAllTeamsSummaryForPeriod(startDate, endDate) {
         userId: user.id, username: user.username,
         supervisor: user.supervisor || '',
         goal_money: user.goal_money || 0,
+        shift_start: user.shift_start || '',
+        shift_end: user.shift_end || '',
         latitude: user.latitude || '', longitude: user.longitude || '',
         address: user.address || '',
         lastSeen: user.last_seen || null,
@@ -1019,6 +1099,7 @@ function renderPainel(data) {
       '<div class="ranking-name">' + escapeHtml(t.username) + (t.supervisor ? ' <span style="font-size:11px;color:var(--text-muted);font-weight:400;">(' + escapeHtml(t.supervisor) + ')</span>' : '') + '</div>' +
       '<div class="ranking-status ' + statusInfo.className + '"><span class="status-dot"></span><span class="status-label">' + statusInfo.label + '</span></div>' +
       (t.goal_money > 0 ? '<div style="margin-top:4px;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;"><span style="font-size:10px;color:var(--text-muted);">Meta: ' + fmtMoney(t.goal_money) + '</span><span style="font-size:10px;font-weight:700;color:var(--money);">' + Math.min(100, Math.round((t.totalMoney / t.goal_money) * 100)) + '%</span></div><div style="width:100%;height:6px;background:var(--border);border-radius:3px;overflow:hidden;"><div style="height:100%;background:var(--money);border-radius:3px;width:' + Math.min(100, (t.totalMoney / t.goal_money) * 100) + '%;"></div></div></div>' : '') +
+      shiftMiniBar(t) +
       '</div>' +
       '<div class="ranking-stats">' +
       '<div class="ranking-ups">' + t.totalUps + ' UPS</div>' +
@@ -1048,7 +1129,7 @@ function renderTeamsList(users) {
     container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">groups</span><p>Nenhuma equipe cadastrada</p></div>';
     return;
   }
-  var html = '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Nome</th><th>Supervisor</th><th>Meta R$</th><th>Status</th><th>Função</th><th>Localização</th><th>Ações</th></tr></thead><tbody>';
+  var html = '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Nome</th><th>Supervisor</th><th>Meta R$</th><th>Status</th><th>Função</th><th>Turno</th><th>Localização</th><th>Ações</th></tr></thead><tbody>';
   for (var i = 0; i < teams.length; i++) {
     var t = teams[i];
     var statusInfo = getStatusInfo(t.last_seen);
@@ -1062,6 +1143,14 @@ function renderTeamsList(users) {
     }
     var goalDisplay = t.goal_money > 0 ? fmtMoney(t.goal_money) : '<span style="color:var(--text-muted);">—</span>';
     var supDisplay = t.supervisor ? escapeHtml(t.supervisor) : '<span style="color:var(--text-muted);">—</span>';
+    var shiftDisplay = '<span style="color:var(--text-muted);">—</span>';
+    var shiftStatus = '';
+    var shiftSp = getShiftProgress(t);
+    if (shiftSp.enabled) {
+      var sColor = shiftColor(shiftSp);
+      shiftDisplay = '<span style="font-size:12px;font-weight:600;">' + shiftSp.start + ' – ' + shiftSp.end + '</span>';
+      shiftStatus = '<span style="display:inline-block;margin-top:2px;font-size:10px;font-weight:700;color:' + sColor + ';">' + shiftSp.label + '</span>';
+    }
     html += '<tr>' +
       '<td style="font-weight:600;color:var(--text-muted);">#' + t.id.slice(-6) + '</td>' +
       '<td><strong>' + escapeHtml(t.username) + '</strong></td>' +
@@ -1069,6 +1158,7 @@ function renderTeamsList(users) {
       '<td style="color:var(--money);font-weight:600;">' + goalDisplay + '</td>' +
       '<td>' + statusHtml + '</td>' +
       '<td><span style="background:var(--primary-bg);color:var(--primary);padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600;">' + t.role + '</span></td>' +
+      '<td>' + shiftDisplay + shiftStatus + '</td>' +
       '<td>' + locDisplay + '</td>' +
       '<td class="actions">' +
       '<button class="btn btn-sm btn-outline" onclick="editTeam(\'' + t.id + '\')"><span class="material-symbols-outlined">edit</span> Editar</button>' +
@@ -1089,6 +1179,8 @@ function createTeam() {
   var supervisor = $('newTeamSupervisor').value.trim();
   var goalRaw = $('newTeamGoal').value;
   var goalMoney = parseFloat(goalRaw) || 0;
+  var shiftStart = $('newTeamShiftStart').value;
+  var shiftEnd = $('newTeamShiftEnd').value;
   if (!name || !pass) { showMsg('teamFormMsgAdmin', 'error', 'Preencha nome e senha da equipe'); return; }
   clearMsg('teamFormMsgAdmin');
 
@@ -1111,6 +1203,8 @@ function createTeam() {
       username: name, password: pass, role: 'equipe',
       supervisor: supervisor || '',
       goal_money: goalMoney,
+      shift_start: shiftStart || '',
+      shift_end: shiftEnd || '',
       latitude: String(adminLocation.lat),
       longitude: String(adminLocation.lng),
       address: adminAddress || '',
@@ -1125,6 +1219,8 @@ function createTeam() {
       $('newTeamPass').value = '';
       $('newTeamSupervisor').value = '';
       $('newTeamGoal').value = '';
+      $('newTeamShiftStart').value = '';
+      $('newTeamShiftEnd').value = '';
       toast('Equipe criada com sucesso!', 'success');
       loadAllAdminData();
       adminLocation = null;
@@ -1177,6 +1273,8 @@ function editTeam(id) {
     $('editTeamName').value = user.username || '';
     $('editTeamSupervisor').value = user.supervisor || '';
     $('editTeamGoal').value = user.goal_money > 0 ? user.goal_money : '';
+    $('editTeamShiftStart').value = user.shift_start || '';
+    $('editTeamShiftEnd').value = user.shift_end || '';
     $('editTeamPass').value = '';
     clearMsg('editTeamMsg');
     $('editTeamModal').style.display = 'flex';
@@ -1192,6 +1290,8 @@ function saveEditTeam() {
   var supervisor = $('editTeamSupervisor').value.trim();
   var goalRaw = $('editTeamGoal').value;
   var goalMoney = parseFloat(goalRaw) || 0;
+  var shiftStart = $('editTeamShiftStart').value;
+  var shiftEnd = $('editTeamShiftEnd').value;
   var newPass = $('editTeamPass').value.trim();
 
   if (!name) { showMsg('editTeamMsg', 'error', 'O nome da equipe é obrigatório'); return; }
@@ -1200,7 +1300,9 @@ function saveEditTeam() {
   var updateData = {
     username: name,
     supervisor: supervisor || '',
-    goal_money: goalMoney
+    goal_money: goalMoney,
+    shift_start: shiftStart || '',
+    shift_end: shiftEnd || ''
   };
 
   if (newPass && newPass.length >= 3) {
@@ -1980,6 +2082,192 @@ function closeEditServiceModal() {
   $('editServiceModal').style.display = 'none';
 }
 
+// ===== OFFLINE / SINCRONIZAÇÃO / ATUALIZAÇÃO =====
+var syncStatusTimer = null;
+var updateCheckTimer = null;
+
+function updateSyncStatus() {
+  if (!window.OfflineDB) return;
+  OfflineDB.getStatus().then(function(st) {
+    var chip = $('syncChip');
+    if (!chip) return;
+    var txt = $('syncText');
+    if (st.pending > 0) {
+      chip.className = 'sync-chip sync-pending';
+      txt.textContent = (st.online ? 'Sincronizando' : 'Offline') + ' • ' + st.pending + ' pendente' + (st.pending !== 1 ? 's' : '');
+    } else if (!st.online) {
+      chip.className = 'sync-chip sync-offline';
+      txt.textContent = 'Offline';
+    } else {
+      chip.className = 'sync-chip sync-online';
+      txt.textContent = 'Online • Sincronizado';
+    }
+  }).catch(function() {});
+}
+
+function onOnline() {
+  updateSyncStatus();
+  OfflineDB.requestSync().then(function(flushed) {
+    updateSyncStatus();
+    if (flushed) {
+      toast('Conexão restaurada. Dados sincronizados!', 'success');
+      refreshAfterSync();
+    }
+  });
+  checkForUpdate();
+}
+
+function onOffline() {
+  updateSyncStatus();
+  toast('Sem conexão. O app continua funcionando offline.', 'warning');
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState !== 'visible') return;
+  checkForUpdate();
+  if (OfflineDB.isOnline()) OfflineDB.requestSync();
+  updateSyncStatus();
+}
+
+function refreshAfterSync() {
+  if (!currentUser) return;
+  if (currentUser.role === 'admin') {
+    loadAllAdminData();
+  } else {
+    refreshTeamView();
+    loadTeamCatalog();
+  }
+}
+
+// ===== ATUALIZAÇÃO OBRIGATÓRIA =====
+function checkForUpdate() {
+  if (!window.OfflineDB || !navigator.onLine) return;
+  fetch('version.json?t=' + Date.now(), { cache: 'no-store' }).then(function(r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function(data) {
+    var serverV = data && data.version;
+    if (serverV && serverV !== APP_VERSION) {
+      showUpdateModal(serverV);
+    }
+  }).catch(function() {});
+}
+
+function showUpdateModal(serverV) {
+  var modal = $('updateModal');
+  if (!modal) return;
+  if ($('updateVersionText')) $('updateVersionText').textContent = serverV;
+  modal.classList.add('active');
+}
+
+function applyUpdate() {
+  var btn = $('updateNowBtn');
+  var restoreBtn = function() {
+    if (btn) { btn.disabled = false; btn.textContent = 'Atualizar agora'; }
+  };
+  if (btn) { btn.disabled = true; btn.textContent = 'Atualizando...'; }
+
+  var reloaded = false;
+  var forceReload = function() {
+    if (reloaded) return;
+    reloaded = true;
+    if ('caches' in window) {
+      caches.keys().then(function(keys) {
+        return Promise.all(keys.map(function(k) { return caches.delete(k); }));
+      }).catch(function() {}).then(function() {
+        window.location.reload();
+      });
+    } else {
+      window.location.reload();
+    }
+  };
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('controllerchange', forceReload);
+    navigator.serviceWorker.getRegistration().then(function(reg) {
+      if (!reg) { forceReload(); return; }
+      reg.update().catch(function() {});
+      setTimeout(forceReload, 3000);
+    }).catch(function() {
+      setTimeout(forceReload, 3000);
+    });
+  } else {
+    window.location.reload();
+  }
+
+  setTimeout(restoreBtn, 10000);
+}
+
+// ===== INSTALAÇÃO (PWA) =====
+var deferredInstallPrompt = null;
+var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+var isStandalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+function isInAppBrowser() {
+  return /FBAN|FBAV|Instagram|Line|WhatsApp|Messenger|MicroMessenger|KAKAOTALK/i.test(navigator.userAgent);
+}
+
+function captureInstallPrompt() {
+  window.addEventListener('beforeinstallprompt', function(e) {
+    e.preventDefault();
+    deferredInstallPrompt = e;
+    var banner = $('installBanner');
+    if (banner) banner.style.display = (isStandalone || isInAppBrowser()) ? 'none' : 'flex';
+  });
+  window.addEventListener('appinstalled', function() {
+    var banner = $('installBanner');
+    if (banner) banner.style.display = 'none';
+    deferredInstallPrompt = null;
+    toast('Aplicativo instalado!', 'success');
+  });
+}
+
+function installApp() {
+  if (isStandalone) { toast('O aplicativo já está instalado.', 'info'); return; }
+  if (deferredInstallPrompt) {
+    deferredInstallPrompt.prompt();
+    deferredInstallPrompt.userChoice.then(function(choice) {
+      deferredInstallPrompt = null;
+      var banner = $('installBanner');
+      if (banner) banner.style.display = 'none';
+    });
+    return;
+  }
+  showInstallHelp();
+}
+
+function showInstallHelp() {
+  var introEl = $('installHelpIntro');
+  var stepsEl = $('installHelpSteps');
+  var html = '';
+  var intro = '';
+  if (isInAppBrowser()) {
+    intro = 'Este navegador não permite instalar o aplicativo. Abra o endereço no Chrome (Android) ou no Safari (iPhone).';
+    html = '<div class="install-help-step"><b>1.</b><span>Copie o endereço da página e abra no <strong>Chrome</strong> ou <strong>Safari</strong>.</span></div>' +
+      '<div class="install-help-step"><b>2.</b><span>Depois é só tocar no botão <strong>Instalar</strong> que aparece na tela.</span></div>';
+  } else if (isIOS) {
+    intro = 'No iPhone, a instalação é feita pelo menu do Safari:';
+    html = '<div class="install-help-step"><b>1.</b><span>Toque no botão <strong>Compartilhar</strong> (ícone ↑ dentro de um quadrado).</span></div>' +
+      '<div class="install-help-step"><b>2.</b><span>Role para baixo e toque em <strong>Adicionar à Tela de Início</strong>.</span></div>' +
+      '<div class="install-help-step"><b>3.</b><span>Toque em <strong>Adicionar</strong> no canto superior direito.</span></div>' +
+      '<div class="install-help-step"><b>4.</b><span>O ícone do UPS aparecerá na tela inicial como um aplicativo.</span></div>';
+  } else {
+    intro = 'No Android, use o navegador Chrome:';
+    html = '<div class="install-help-step"><b>1.</b><span>Toque no botão <strong>Instalar</strong> deste aviso (se ele aparecer).</span></div>' +
+      '<div class="install-help-step"><b>2.</b><span>Ou toque no menu <strong>⋮</strong> → <strong>Instalar aplicativo</strong> (ou <strong>Adicionar à tela inicial</strong>).</span></div>' +
+      '<div class="install-help-step"><b>3.</b><span>Confirme em <strong>Instalar</strong>. O app será instalado como um programa.</span></div>';
+  }
+  introEl.textContent = intro;
+  stepsEl.innerHTML = html;
+  $('installHelpModal').style.display = 'flex';
+}
+
+function closeInstallHelp() {
+  $('installHelpModal').style.display = 'none';
+}
+
+captureInstallPrompt();
+
 // ===== GLOBAL ERROR CATCHER =====
 window.onerror = function(msg, url, line) {
   console.error('Erro global:', msg, url, line);
@@ -2000,6 +2288,23 @@ document.addEventListener('DOMContentLoaded', function() {
     $('loginPass').value = savedPass;
     $('rememberMe').checked = true;
   }
+
+  // Configura a camada offline e eventos de rede
+  OfflineDB.setBaseUrl(DB_BASE_URL);
+  OfflineDB.setStatusCallback(updateSyncStatus);
+  OfflineDB.init().then(function() {
+    OfflineDB.sync();
+    updateSyncStatus();
+  });
+
+  window.addEventListener('online', onOnline);
+  window.addEventListener('offline', onOffline);
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  window.addEventListener('focus', function() { onVisibilityChange(); });
+
+  syncStatusTimer = setInterval(updateSyncStatus, 5000);
+  checkForUpdate();
+  updateCheckTimer = setInterval(checkForUpdate, 60000);
 
   seedData().then(function() { return fbOnce('rules'); }).then(function(rules) {
     rulesCache = toArray(rules).map(function(r) {
