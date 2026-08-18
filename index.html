@@ -191,6 +191,31 @@
     .calc-display .calc-item .calc-value { font-size: 16px; font-weight: 800; color: var(--primary); }
     .calc-display .calc-item .calc-label { font-size: 10px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.3px; font-weight: 600; }
     .calc-display .calc-item .calc-value.money { color: var(--money); }
+    .kanban-board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .kanban-column { background: var(--bg); border-radius: var(--radius); border: 1px solid var(--border-light); overflow: hidden; max-height: 70vh; display: flex; flex-direction: column; }
+    .kanban-column-header { padding: 8px 10px; display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid; flex-shrink: 0; }
+    .kanban-column-header .col-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+    .kanban-column-header .col-count { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 20px; background: rgba(0,0,0,0.08); }
+    .kanban-column-body { padding: 6px; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; flex: 1; }
+    .kanban-column-body::-webkit-scrollbar { width: 3px; }
+    .kanban-column-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    .kanban-card { background: var(--card); border-radius: var(--radius-sm); padding: 8px 10px; box-shadow: var(--shadow-sm); border: 1px solid var(--border-light); transition: all var(--transition); }
+    .kanban-card:hover { box-shadow: var(--shadow-md); }
+    .kanban-card .card-header { display: flex; align-items: center; gap: 6px; }
+    .kanban-card .card-name { font-weight: 700; font-size: 12px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .kanban-card .card-toggle { background: none; border: none; cursor: pointer; padding: 2px; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: var(--text-muted); transition: all var(--transition); flex-shrink: 0; }
+    .kanban-card .card-toggle:hover { background: var(--bg); color: var(--text); }
+    .kanban-card .card-toggle .material-symbols-outlined { font-size: 16px; transition: transform 0.2s ease; }
+    .kanban-card.collapsed .card-toggle .material-symbols-outlined { transform: rotate(-90deg); }
+    .kanban-card .card-info { font-size: 10px; color: var(--text-secondary); display: flex; flex-direction: column; gap: 1px; margin-top: 4px; }
+    .kanban-card .card-info span { display: flex; align-items: center; gap: 3px; }
+    .kanban-card .card-info .material-symbols-outlined { font-size: 12px; }
+    .kanban-card.collapsed .card-info { display: none; }
+    .kanban-card.collapsed { padding: 6px 10px; }
+    .kanban-empty { text-align: center; padding: 14px 8px; color: var(--text-muted); font-size: 11px; }
+    .kanban-empty .material-symbols-outlined { font-size: 24px; display: block; margin-bottom: 4px; opacity: 0.4; }
+    .kanban-section-title { font-size: 13px; font-weight: 700; margin: 16px 0 8px; display: flex; align-items: center; gap: 6px; color: var(--text); }
+    .kanban-section-title .material-symbols-outlined { font-size: 18px; color: var(--primary); }
     .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
     .status-online { color: var(--success); } .status-online .status-dot { background: var(--success); }
     .status-offline { color: var(--text-muted); } .status-offline .status-dot { background: var(--text-muted); }
@@ -612,6 +637,7 @@
     <button class="nav-tab" data-tab="tabMapa"><span class="material-symbols-outlined">map</span> Mapa</button>
     <button class="nav-tab" data-tab="tabEstatisticas"><span class="material-symbols-outlined">insights</span> Estatísticas</button>
     <button class="nav-tab" data-tab="tabAuditoria"><span class="material-symbols-outlined">fact_check</span> Auditoria</button>
+    <button class="nav-tab" data-tab="tabClassificacao"><span class="material-symbols-outlined">workspace_premium</span> Classificação</button>
   </div>
   <div class="tab-content active" id="tabPainel">
     <div class="card">
@@ -730,6 +756,34 @@
       </div>
       <div id="auditoriaMsg" class="msg"></div>
       <div id="auditoriaContent"><div class="empty-state"><span class="material-symbols-outlined">fact_check</span><p>Selecione um período e clique em Consultar</p></div></div>
+    </div>
+  </div>
+  <div class="tab-content" id="tabClassificacao">
+    <div class="card">
+      <div class="card-title"><span class="material-symbols-outlined">workspace_premium</span> Classificação das Equipes</div>
+      <p class="card-subtitle">Média de UPS por dia com registro, organizada por classe (A a D) conforme regras do SISREMA.</p>
+      <div class="form-row" style="margin-bottom:14px;">
+        <div class="form-group">
+          <label>Data Início</label>
+          <input type="date" id="classificacaoStartDate">
+        </div>
+        <div class="form-group">
+          <label>Data Fim</label>
+          <input type="date" id="classificacaoEndDate">
+        </div>
+        <div class="form-group" style="display:flex;align-items:flex-end;">
+          <button class="btn btn-primary" onclick="loadClassificacao()" style="width:100%;">
+            <span class="material-symbols-outlined">search</span> Consultar
+          </button>
+        </div>
+        <div class="form-group" style="display:flex;align-items:flex-end;">
+          <button class="btn btn-outline" onclick="setClassificacaoCurrentMonth()" style="width:100%;">
+            <span class="material-symbols-outlined">calendar_month</span> Mês Atual
+          </button>
+        </div>
+      </div>
+      <div id="classificacaoMsg" class="msg"></div>
+      <div id="classificacaoContent"><div class="empty-state"><span class="material-symbols-outlined">workspace_premium</span><p>Selecione um período e clique em Consultar</p></div></div>
     </div>
   </div>
 </div>

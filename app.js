@@ -1013,6 +1013,9 @@ function initTabs() {
       if (tabId === 'tabAuditoria') {
         initAuditoria();
       }
+      if (tabId === 'tabClassificacao') {
+        initClassificacao();
+      }
     });
   }
 }
@@ -2080,6 +2083,213 @@ function deleteAuditoriaService(serviceId) {
 
 function closeEditServiceModal() {
   $('editServiceModal').style.display = 'none';
+}
+
+// --- Classificação ---
+function toggleKanbanCard(id) {
+  var card = document.getElementById(id);
+  if (card) card.classList.toggle('collapsed');
+}
+
+function initClassificacao() {
+  var now = new Date();
+  var firstDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-01';
+  var lastDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()).padStart(2, '0');
+  if (!$('classificacaoStartDate').value) $('classificacaoStartDate').value = firstDay;
+  if (!$('classificacaoEndDate').value) $('classificacaoEndDate').value = lastDay;
+}
+
+function setClassificacaoCurrentMonth() {
+  var now = new Date();
+  var firstDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-01';
+  var lastDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()).padStart(2, '0');
+  $('classificacaoStartDate').value = firstDay;
+  $('classificacaoEndDate').value = lastDay;
+  loadClassificacao();
+}
+
+function loadClassificacao() {
+  var start = $('classificacaoStartDate').value;
+  var end = $('classificacaoEndDate').value;
+  if (!start || !end) {
+    showMsg('classificacaoMsg', 'error', 'Selecione o período');
+    return;
+  }
+  if (start > end) {
+    showMsg('classificacaoMsg', 'error', 'Data início deve ser anterior à data fim');
+    return;
+  }
+  clearMsg('classificacaoMsg');
+  loading(true);
+  Promise.all([fbOnce('users'), fbOnce('services'), fbOnce('rules')]).then(function(results) {
+    loading(false);
+    var users = toArray(results[0]).filter(function(u) { return u.role !== 'admin'; });
+    var allServices = toArray(results[1]);
+    rulesCache = toArray(results[2]).map(function(r) {
+      return { id: r.id, class: r.class, minUps: r.min_ups, maxUps: r.max_ups, color: r.color };
+    });
+
+    var teamsData = users.map(function(user) {
+      var svcs = allServices.filter(function(s) {
+        return s.user_id === user.id && s.date >= start && s.date <= end;
+      });
+      var services = svcs.map(function(s) { return formatService(s); });
+      var totalUps = services.reduce(function(sum, sv) { return sum + sv.upsValue; }, 0);
+      var totalMoney = services.reduce(function(sum, sv) { return sum + (sv.totalMoney || 0); }, 0);
+
+      var uniqueDays = {};
+      for (var i = 0; i < services.length; i++) {
+        if (services[i].date) uniqueDays[services[i].date] = true;
+      }
+      var daysCount = Object.keys(uniqueDays).length;
+      var avgUps = daysCount > 0 ? totalUps / daysCount : 0;
+      var classInfo = getClassification(avgUps);
+
+      return {
+        userId: user.id,
+        username: user.username,
+        supervisor: user.supervisor || '',
+        totalUps: totalUps,
+        totalMoney: totalMoney,
+        daysCount: daysCount,
+        avgUps: avgUps,
+        servicesCount: services.length,
+        class: classInfo.class,
+        color: classInfo.color
+      };
+    });
+
+    // Supervisor aggregation (média das médias das equipes)
+    var supMap = {};
+    for (var i = 0; i < teamsData.length; i++) {
+      var t = teamsData[i];
+      var supName = t.supervisor || 'Sem Supervisor';
+      if (!supMap[supName]) {
+        supMap[supName] = { name: supName, avgUpsSum: 0, teamsCount: 0, totalUps: 0, totalMoney: 0, servicesCount: 0 };
+      }
+      supMap[supName].avgUpsSum += t.avgUps;
+      supMap[supName].teamsCount += 1;
+      supMap[supName].totalUps += t.totalUps;
+      supMap[supName].totalMoney += t.totalMoney;
+      supMap[supName].servicesCount += t.servicesCount;
+    }
+    var supData = [];
+    var supKeys = Object.keys(supMap);
+    for (var k = 0; k < supKeys.length; k++) {
+      var sup = supMap[supKeys[k]];
+      var supAvgUps = sup.teamsCount > 0 ? sup.avgUpsSum / sup.teamsCount : 0;
+      var supClass = getClassification(supAvgUps);
+      supData.push({
+        name: sup.name,
+        totalUps: sup.totalUps,
+        totalMoney: sup.totalMoney,
+        avgUps: supAvgUps,
+        teamsCount: sup.teamsCount,
+        servicesCount: sup.servicesCount,
+        class: supClass.class,
+        color: supClass.color
+      });
+    }
+
+    renderClassificacao(teamsData, supData, start, end);
+  }).catch(function(err) {
+    loading(false);
+    showMsg('classificacaoMsg', 'error', 'Erro: ' + err.message);
+  });
+}
+
+function buildKanbanHtml(groups, classOrder, classLabels, classIcons, classColors, isSupervisor) {
+  var html = '<div class="kanban-board">';
+  for (var c = 0; c < classOrder.length; c++) {
+    var clsKey = classOrder[c];
+    var colTeams = groups[clsKey] || [];
+    var colColor = classColors[clsKey];
+    html += '<div class="kanban-column">';
+    html += '<div class="kanban-column-header" style="border-color:' + colColor + ';">';
+    html += '<span class="col-label" style="color:' + colColor + ';"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle;margin-right:3px;">' + classIcons[clsKey] + '</span>' + classLabels[clsKey] + '</span>';
+    html += '<span class="col-count">' + colTeams.length + '</span>';
+    html += '</div>';
+    html += '<div class="kanban-column-body">';
+    if (colTeams.length === 0) {
+      html += '<div class="kanban-empty"><span class="material-symbols-outlined">inbox</span>Nenhum' + (isSupervisor ? ' supervisor' : ' item') + '</div>';
+    } else {
+      for (var j = 0; j < colTeams.length; j++) {
+        var item = colTeams[j];
+        var cardId = (isSupervisor ? 'sup-card-' : 'team-card-') + clsKey + '-' + j;
+        html += '<div class="kanban-card collapsed" id="' + cardId + '">';
+        html += '<div class="card-header">';
+        html += '<div class="card-name" style="color:' + colColor + ';">' + escapeHtml(item.username || item.name) + '</div>';
+        html += '<button class="card-toggle" onclick="toggleKanbanCard(\'' + cardId + '\')"><span class="material-symbols-outlined">expand_more</span></button>';
+        html += '</div>';
+        html += '<div class="card-info">';
+        html += '<span><span class="material-symbols-outlined">trending_up</span>Média: <strong>' + fmtUps(item.avgUps) + '</strong> UPS/dia</span>';
+        if (isSupervisor) {
+          html += '<span><span class="material-symbols-outlined">groups</span>' + item.teamsCount + ' equipe' + (item.teamsCount !== 1 ? 's' : '') + '</span>';
+        } else {
+          html += '<span><span class="material-symbols-outlined">date_range</span>' + item.daysCount + ' dia' + (item.daysCount !== 1 ? 's' : '') + ' trabalhado' + (item.daysCount !== 1 ? 's' : '') + '</span>';
+        }
+        html += '<span><span class="material-symbols-outlined">functions</span>Total: ' + fmtUps(item.totalUps) + ' UPS em ' + item.servicesCount + ' lançamento' + (item.servicesCount !== 1 ? 's' : '') + '</span>';
+        if (!isSupervisor && item.supervisor) {
+          html += '<span><span class="material-symbols-outlined">supervisor_account</span>' + escapeHtml(item.supervisor) + '</span>';
+        }
+        html += '</div></div>';
+      }
+    }
+    html += '</div></div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function renderClassificacao(teamsData, supData, startDate, endDate) {
+  var container = $('classificacaoContent');
+  if (!teamsData || teamsData.length === 0) {
+    container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">groups</span><p>Nenhuma equipe encontrada</p></div>';
+    return;
+  }
+
+  var classLabels = { A: 'Classe A', B: 'Classe B', C: 'Classe C', D: 'Classe D' };
+  var classIcons = { A: 'emoji_events', B: 'military_tech', C: 'workspace_premium', D: 'trending_down' };
+  var classColors = { A: '#2ecc71', B: '#3498db', C: '#f39c12', D: '#e74c3c' };
+  var classOrder = ['A', 'B', 'C', 'D'];
+
+  // Team groups
+  var groups = { A: [], B: [], C: [], D: [] };
+  for (var i = 0; i < teamsData.length; i++) {
+    var cls = teamsData[i].class;
+    if (!groups[cls]) groups[cls] = [];
+    groups[cls].push(teamsData[i]);
+  }
+  Object.keys(groups).forEach(function(k) {
+    groups[k].sort(function(a, b) { return b.avgUps - a.avgUps; });
+  });
+
+  // Supervisor groups
+  var supGroups = { A: [], B: [], C: [], D: [] };
+  for (var s = 0; s < supData.length; s++) {
+    var sCls = supData[s].class;
+    if (!supGroups[sCls]) supGroups[sCls] = [];
+    supGroups[sCls].push(supData[s]);
+  }
+  Object.keys(supGroups).forEach(function(k) {
+    supGroups[k].sort(function(a, b) { return b.avgUps - a.avgUps; });
+  });
+
+  var totalTeams = teamsData.length;
+  var totalSup = supData.length;
+  var html = '<div class="stats-overview" style="margin-bottom:10px;">';
+  html += '<div class="stat-box"><span class="stat-box-icon teams"><span class="material-symbols-outlined">groups</span></span><div><div class="stat-box-value">' + totalTeams + '</div><div class="stat-box-label">Equipes</div></div></div>';
+  html += '<div class="stat-box"><span class="stat-box-icon services"><span class="material-symbols-outlined">supervisor_account</span></span><div><div class="stat-box-value">' + totalSup + '</div><div class="stat-box-label">Supervisores</div></div></div>';
+  html += '<div class="stat-box"><span class="stat-box-icon ups"><span class="material-symbols-outlined">calendar_month</span></span><div><div class="stat-box-value" style="font-size:12px;">' + formatDateBr(startDate) + ' a ' + formatDateBr(endDate) + '</div><div class="stat-box-label">Período</div></div></div>';
+  html += '</div>';
+
+  html += '<div class="kanban-section-title"><span class="material-symbols-outlined">groups</span> Classificação das Equipes</div>';
+  html += buildKanbanHtml(groups, classOrder, classLabels, classIcons, classColors, false);
+
+  html += '<div class="kanban-section-title"><span class="material-symbols-outlined">supervisor_account</span> Classificação dos Supervisores</div>';
+  html += buildKanbanHtml(supGroups, classOrder, classLabels, classIcons, classColors, true);
+
+  container.innerHTML = html;
 }
 
 // ===== OFFLINE / SINCRONIZAÇÃO / ATUALIZAÇÃO =====
