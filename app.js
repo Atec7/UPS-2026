@@ -1016,6 +1016,9 @@ function initTabs() {
       if (tabId === 'tabClassificacao') {
         initClassificacao();
       }
+      if (tabId === 'tabApontamento') {
+        initApontamento();
+      }
     });
   }
 }
@@ -1132,7 +1135,8 @@ function renderTeamsList(users) {
     container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">groups</span><p>Nenhuma equipe cadastrada</p></div>';
     return;
   }
-  var html = '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Nome</th><th>Supervisor</th><th>Meta R$</th><th>Status</th><th>Função</th><th>Turno</th><th>Localização</th><th>Ações</th></tr></thead><tbody>';
+  var dayNames = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+  var html = '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Nome</th><th>Supervisor</th><th>Meta R$</th><th>Status</th><th>Função</th><th>Turno</th><th>Dias</th><th>Localização</th><th>Ações</th></tr></thead><tbody>';
   for (var i = 0; i < teams.length; i++) {
     var t = teams[i];
     var statusInfo = getStatusInfo(t.last_seen);
@@ -1154,6 +1158,12 @@ function renderTeamsList(users) {
       shiftDisplay = '<span style="font-size:12px;font-weight:600;">' + shiftSp.start + ' – ' + shiftSp.end + '</span>';
       shiftStatus = '<span style="display:inline-block;margin-top:2px;font-size:10px;font-weight:700;color:' + sColor + ';">' + shiftSp.label + '</span>';
     }
+    var daysDisplay = '<span style="color:var(--text-muted);">—</span>';
+    if (t.days_of_week && t.days_of_week.length > 0) {
+      daysDisplay = t.days_of_week.map(function(d) {
+        return '<span style="display:inline-block;padding:1px 5px;margin:1px;font-size:10px;font-weight:600;background:var(--primary-bg);color:var(--primary);border-radius:4px;">' + dayNames[d] + '</span>';
+      }).join('');
+    }
     html += '<tr>' +
       '<td style="font-weight:600;color:var(--text-muted);">#' + t.id.slice(-6) + '</td>' +
       '<td><strong>' + escapeHtml(t.username) + '</strong></td>' +
@@ -1162,6 +1172,7 @@ function renderTeamsList(users) {
       '<td>' + statusHtml + '</td>' +
       '<td><span style="background:var(--primary-bg);color:var(--primary);padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600;">' + t.role + '</span></td>' +
       '<td>' + shiftDisplay + shiftStatus + '</td>' +
+      '<td>' + daysDisplay + '</td>' +
       '<td>' + locDisplay + '</td>' +
       '<td class="actions">' +
       '<button class="btn btn-sm btn-outline" onclick="editTeam(\'' + t.id + '\')"><span class="material-symbols-outlined">edit</span> Editar</button>' +
@@ -1176,6 +1187,22 @@ function captureLocationForTeam() {
   captureAdminLocation();
 }
 
+function getSelectedDaysOfWeek() {
+  var days = [];
+  var checkboxes = document.querySelectorAll('#newTeamDays input[name="teamDay"]:checked');
+  for (var i = 0; i < checkboxes.length; i++) {
+    days.push(parseInt(checkboxes[i].value));
+  }
+  return days;
+}
+
+function setSelectedDaysOfWeek(days) {
+  var checkboxes = document.querySelectorAll('#editTeamDays input[name="editTeamDay"]');
+  for (var i = 0; i < checkboxes.length; i++) {
+    checkboxes[i].checked = days && days.indexOf(parseInt(checkboxes[i].value)) !== -1;
+  }
+}
+
 function createTeam() {
   var name = $('newTeamName').value.trim();
   var pass = $('newTeamPass').value.trim();
@@ -1184,6 +1211,7 @@ function createTeam() {
   var goalMoney = parseFloat(goalRaw) || 0;
   var shiftStart = $('newTeamShiftStart').value;
   var shiftEnd = $('newTeamShiftEnd').value;
+  var daysOfWeek = getSelectedDaysOfWeek();
   if (!name || !pass) { showMsg('teamFormMsgAdmin', 'error', 'Preencha nome e senha da equipe'); return; }
   clearMsg('teamFormMsgAdmin');
 
@@ -1208,6 +1236,7 @@ function createTeam() {
       goal_money: goalMoney,
       shift_start: shiftStart || '',
       shift_end: shiftEnd || '',
+      days_of_week: daysOfWeek,
       latitude: String(adminLocation.lat),
       longitude: String(adminLocation.lng),
       address: adminAddress || '',
@@ -1224,6 +1253,8 @@ function createTeam() {
       $('newTeamGoal').value = '';
       $('newTeamShiftStart').value = '';
       $('newTeamShiftEnd').value = '';
+      var dayCheckboxes = document.querySelectorAll('#newTeamDays input[name="teamDay"]');
+      for (var d = 0; d < dayCheckboxes.length; d++) { dayCheckboxes[d].checked = false; }
       toast('Equipe criada com sucesso!', 'success');
       loadAllAdminData();
       adminLocation = null;
@@ -1278,6 +1309,7 @@ function editTeam(id) {
     $('editTeamGoal').value = user.goal_money > 0 ? user.goal_money : '';
     $('editTeamShiftStart').value = user.shift_start || '';
     $('editTeamShiftEnd').value = user.shift_end || '';
+    setSelectedDaysOfWeek(user.days_of_week || []);
     $('editTeamPass').value = '';
     clearMsg('editTeamMsg');
     $('editTeamModal').style.display = 'flex';
@@ -1296,6 +1328,11 @@ function saveEditTeam() {
   var shiftStart = $('editTeamShiftStart').value;
   var shiftEnd = $('editTeamShiftEnd').value;
   var newPass = $('editTeamPass').value.trim();
+  var editCheckboxes = document.querySelectorAll('#editTeamDays input[name="editTeamDay"]');
+  var editDays = [];
+  for (var i = 0; i < editCheckboxes.length; i++) {
+    if (editCheckboxes[i].checked) editDays.push(parseInt(editCheckboxes[i].value));
+  }
 
   if (!name) { showMsg('editTeamMsg', 'error', 'O nome da equipe é obrigatório'); return; }
   clearMsg('editTeamMsg');
@@ -1305,7 +1342,8 @@ function saveEditTeam() {
     supervisor: supervisor || '',
     goal_money: goalMoney,
     shift_start: shiftStart || '',
-    shift_end: shiftEnd || ''
+    shift_end: shiftEnd || '',
+    days_of_week: editDays
   };
 
   if (newPass && newPass.length >= 3) {
@@ -1441,23 +1479,87 @@ function exportData() {
   var end = $('adminEndDate').value;
   if (!start || !end) { toast('Selecione o período', 'error'); return; }
   loading(true);
-  Promise.all([fbOnce('services'), fbOnce('users')]).then(function(results) {
+  Promise.all([fbOnce('services'), fbOnce('users'), fbOnce('shift_notes')]).then(function(results) {
     var allServices = toArray(results[0]);
     var users = toArray(results[1]);
-    var userMap = {};
-    users.forEach(function(u) { userMap[u.id] = u.username; });
-    var filtered = allServices.filter(function(s) {
-      return s.date >= start && s.date <= end;
-    }).map(function(s) {
-      var user = users.find(function(u) { return u.id === s.user_id; });
-      return {
-        id: s.id, equipe: userMap[s.user_id] || 'Desconhecido',
-        servico: s.service_name, ups: s.ups_value, quantidade: s.quantity,
-        valor_total: s.total_money, nota: s.grade, data: s.date,
-        latitude: s.latitude, longitude: s.longitude,
-        endereco_equipe: (user && user.address) || ''
-      };
+    var teams = users.filter(function(u) { return u.role !== 'admin'; });
+    var teamMap = {};
+    teams.forEach(function(u) { teamMap[u.id] = u; });
+    var allNotes = toArray(results[2]);
+    var notesMap = {};
+    allNotes.forEach(function(n) { notesMap[n.team_id + '_' + n.date] = n; });
+    var servicesByTeamDate = {};
+    allServices.forEach(function(s) {
+      if (s.date >= start && s.date <= end) {
+        var key = s.user_id + '_' + s.date;
+        if (!servicesByTeamDate[key]) servicesByTeamDate[key] = [];
+        servicesByTeamDate[key].push(s);
+      }
     });
+    var filtered = [];
+    var dayNames = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+    var currentDate = new Date(start + 'T00:00:00');
+    var endDateObj = new Date(end + 'T00:00:00');
+    while (currentDate <= endDateObj) {
+      var dateStr = currentDate.getFullYear() + '-' + String(currentDate.getMonth() + 1).padStart(2, '0') + '-' + String(currentDate.getDate()).padStart(2, '0');
+      var dayOfWeek = currentDate.getDay();
+      for (var i = 0; i < teams.length; i++) {
+        var t = teams[i];
+        var key = t.id + '_' + dateStr;
+        var dayServices = servicesByTeamDate[key] || [];
+        var isScheduled = t.days_of_week && t.days_of_week.indexOf(dayOfWeek) !== -1;
+        var classification = '';
+        if (dayServices.length > 0 && isScheduled) {
+          classification = 'Abriu';
+        } else if (dayServices.length === 0 && isScheduled) {
+          classification = 'Não abriu';
+        } else if (dayServices.length > 0 && !isScheduled) {
+          classification = 'Extra';
+        } else {
+          continue;
+        }
+        var noteKey = t.id + '_' + dateStr;
+        var note = notesMap[noteKey];
+        var motivo = (note && note.reason) ? note.reason : '';
+        if (dayServices.length > 0) {
+          for (var j = 0; j < dayServices.length; j++) {
+            var s = dayServices[j];
+            filtered.push({
+              equipe: t.username || 'Desconhecido',
+              servico: s.service_name,
+              ups: s.ups_value,
+              quantidade: s.quantity,
+              valor_total: s.total_money,
+              nota: s.grade,
+              data: s.date,
+              meta_diaria: t.goal_money || 0,
+              classificacao: classification,
+              motivo: motivo,
+              latitude: s.latitude,
+              longitude: s.longitude,
+              endereco_equipe: t.address || ''
+            });
+          }
+        } else {
+          filtered.push({
+            equipe: t.username || 'Desconhecido',
+            servico: '',
+            ups: 0,
+            quantidade: 0,
+            valor_total: 0,
+            nota: '',
+            data: dateStr,
+            meta_diaria: t.goal_money || 0,
+            classificacao: classification,
+            motivo: motivo,
+            latitude: '',
+            longitude: '',
+            endereco_equipe: t.address || ''
+          });
+        }
+      }
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
     loading(false);
     if (!filtered || filtered.length === 0) { toast('Nenhum dado para exportar no período', 'info'); return; }
     var csv = '\uFEFF';
@@ -1479,6 +1581,132 @@ function exportData() {
   }).catch(function(err) {
     loading(false);
     toast('Erro ao exportar: ' + err.message, 'error');
+  });
+}
+
+// --- Apontamento de Turno ---
+function initApontamento() {
+  if (!$('apontamentoStartDate').value) {
+    setApontamentoCurrentMonth();
+  }
+}
+
+function setApontamentoCurrentMonth() {
+  var today = new Date();
+  var first = new Date(today.getFullYear(), today.getMonth(), 1);
+  var last = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+  $('apontamentoStartDate').value = todayStr().slice(0, 8) + '01';
+  var lastDay = last.getDate();
+  var lastMonth = String(last.getMonth() + 1).padStart(2, '0');
+  $('apontamentoEndDate').value = today.getFullYear() + '-' + lastMonth + '-' + String(lastDay).padStart(2, '0');
+  loadApontamentos();
+}
+
+function loadApontamentos() {
+  var start = $('apontamentoStartDate').value;
+  var end = $('apontamentoEndDate').value;
+  if (!start || !end) { toast('Selecione o período', 'error'); return; }
+  loading(true);
+  Promise.all([fbOnce('services'), fbOnce('users'), fbOnce('shift_notes')]).then(function(results) {
+    var allServices = toArray(results[0]);
+    var users = toArray(results[1]);
+    var teams = users.filter(function(u) { return u.role !== 'admin'; });
+    var existingNotes = toArray(results[3]);
+    var notesMap = {};
+    existingNotes.forEach(function(n) { notesMap[n.team_id + '_' + n.date] = n; });
+    var servicesByTeamDate = {};
+    allServices.forEach(function(s) {
+      var key = s.user_id + '_' + s.date;
+      if (!servicesByTeamDate[key]) servicesByTeamDate[key] = [];
+      servicesByTeamDate[key].push(s);
+    });
+    var missing = [];
+    var dayNames = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+    var currentDate = new Date(start + 'T00:00:00');
+    var endDate = new Date(end + 'T00:00:00');
+    while (currentDate <= endDate) {
+      var dateStr = currentDate.getFullYear() + '-' + String(currentDate.getMonth() + 1).padStart(2, '0') + '-' + String(currentDate.getDate()).padStart(2, '0');
+      var dayOfWeek = currentDate.getDay();
+      for (var i = 0; i < teams.length; i++) {
+        var t = teams[i];
+        var isScheduled = t.days_of_week && t.days_of_week.indexOf(dayOfWeek) !== -1;
+        if (!isScheduled) continue;
+        var key = t.id + '_' + dateStr;
+        var dayServices = servicesByTeamDate[key] || [];
+        if (dayServices.length === 0) {
+          var noteKey = t.id + '_' + dateStr;
+          var existing = notesMap[noteKey];
+          missing.push({
+            team_id: t.id,
+            team_name: t.username,
+            date: dateStr,
+            day_name: dayNames[dayOfWeek],
+            note_id: existing ? existing.id : null,
+            reason: existing ? existing.reason : ''
+          });
+        }
+      }
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+    loading(false);
+    renderApontamentos(missing);
+  }).catch(function(err) {
+    loading(false);
+    toast('Erro ao carregar apontamentos: ' + err.message, 'error');
+  });
+}
+
+function renderApontamentos(items) {
+  var container = $('apontamentoContent');
+  if (!items || items.length === 0) {
+    container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">check_circle</span><p>Nenhuma equipe faltou no período selecionado</p></div>';
+    return;
+  }
+  var html = '<div class="table-wrap"><table><thead><tr><th>Equipe</th><th>Data</th><th>Dia</th><th>Motivo</th><th>Ação</th></tr></thead><tbody>';
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    var inputId = 'apontamento_' + it.team_id + '_' + it.date.replace(/-/g, '');
+    html += '<tr>' +
+      '<td><strong>' + escapeHtml(it.team_name) + '</strong></td>' +
+      '<td>' + formatDateBr(it.date) + '</td>' +
+      '<td>' + it.day_name + '</td>' +
+      '<td><input type="text" id="' + inputId + '" placeholder="Motivo da ausência..." value="' + escapeHtml(it.reason) + '" style="min-width:200px;"></td>' +
+      '<td><button class="btn btn-sm btn-primary" onclick="saveApontamento(\'' + it.team_id + '\',\'' + it.date + '\',\'' + inputId + '\')"><span class="material-symbols-outlined">save</span> Salvar</button></td>' +
+      '</tr>';
+  }
+  html += '</tbody></table></div>';
+  container.innerHTML = html;
+}
+
+function saveApontamento(teamId, date, inputId) {
+  var reason = $(inputId).value.trim();
+  if (!reason) { toast('Informe o motivo', 'error'); return; }
+  loading(true);
+  var noteKey = teamId + '_' + date;
+  var noteData = {
+    team_id: teamId,
+    date: date,
+    reason: reason,
+    created_by: currentUser ? currentUser.id : '',
+    created_at: nowTimestamp()
+  };
+  fbOnce('shift_notes').then(function(existing) {
+    var notes = toArray(existing);
+    var found = notes.find(function(n) { return n.team_id === teamId && n.date === date; });
+    if (found) {
+      return fbUpdate('shift_notes/' + found.id, noteData).then(function() {
+        loading(false);
+        toast('Apontamento salvo!', 'success');
+      });
+    } else {
+      return fbPush('shift_notes', noteData).then(function() {
+        loading(false);
+        toast('Apontamento salvo!', 'success');
+      });
+    }
+  }).catch(function(err) {
+    loading(false);
+    toast('Erro ao salvar: ' + err.message, 'error');
   });
 }
 

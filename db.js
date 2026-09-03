@@ -10,15 +10,16 @@
   'use strict';
 
   var DB_NAME = 'ups-offline';
-  var DB_VERSION = 1;
+  var DB_VERSION = 2;
   var STORE_MAP = {
     users: 'users',
     rules: 'rules',
     catalog_services: 'catalog',
     services: 'services',
-    location_history: 'location'
+    location_history: 'location',
+    shift_notes: 'shift_notes'
   };
-  var STORES = ['users', 'rules', 'catalog', 'services', 'location', 'meta', 'outbox'];
+  var STORES = ['users', 'rules', 'catalog', 'services', 'location', 'shift_notes', 'meta', 'outbox'];
 
   var baseUrl = '';
   var dbPromise = null;

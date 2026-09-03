@@ -638,6 +638,7 @@
     <button class="nav-tab" data-tab="tabEstatisticas"><span class="material-symbols-outlined">insights</span> Estatísticas</button>
     <button class="nav-tab" data-tab="tabAuditoria"><span class="material-symbols-outlined">fact_check</span> Auditoria</button>
     <button class="nav-tab" data-tab="tabClassificacao"><span class="material-symbols-outlined">workspace_premium</span> Classificação</button>
+    <button class="nav-tab" data-tab="tabApontamento"><span class="material-symbols-outlined">assignment_late</span> Apontamento</button>
   </div>
   <div class="tab-content active" id="tabPainel">
     <div class="card">
@@ -660,6 +661,18 @@
       <div class="form-row">
         <div class="form-group"><label>Início do Turno</label><input type="time" id="newTeamShiftStart"></div>
         <div class="form-group"><label>Fim do Turno</label><input type="time" id="newTeamShiftEnd"></div>
+      </div>
+      <div class="form-group">
+        <label>Dias da Semana (para previsão de abertura)</label>
+        <div id="newTeamDays" style="display:flex;gap:6px;flex-wrap:wrap;">
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:500;cursor:pointer;padding:4px 8px;border:1.5px solid var(--border);border-radius:var(--radius-sm);transition:all var(--transition);"><input type="checkbox" name="teamDay" value="0"> Dom</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:500;cursor:pointer;padding:4px 8px;border:1.5px solid var(--border);border-radius:var(--radius-sm);transition:all var(--transition);"><input type="checkbox" name="teamDay" value="1"> Seg</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:500;cursor:pointer;padding:4px 8px;border:1.5px solid var(--border);border-radius:var(--radius-sm);transition:all var(--transition);"><input type="checkbox" name="teamDay" value="2"> Ter</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:500;cursor:pointer;padding:4px 8px;border:1.5px solid var(--border);border-radius:var(--radius-sm);transition:all var(--transition);"><input type="checkbox" name="teamDay" value="3"> Qua</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:500;cursor:pointer;padding:4px 8px;border:1.5px solid var(--border);border-radius:var(--radius-sm);transition:all var(--transition);"><input type="checkbox" name="teamDay" value="4"> Qui</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:500;cursor:pointer;padding:4px 8px;border:1.5px solid var(--border);border-radius:var(--radius-sm);transition:all var(--transition);"><input type="checkbox" name="teamDay" value="5"> Sex</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:500;cursor:pointer;padding:4px 8px;border:1.5px solid var(--border);border-radius:var(--radius-sm);transition:all var(--transition);"><input type="checkbox" name="teamDay" value="6"> Sáb</label>
+        </div>
       </div>
       <div class="form-group">
         <label>Localização (automática)</label>
@@ -784,6 +797,22 @@
       </div>
       <div id="classificacaoMsg" class="msg"></div>
       <div id="classificacaoContent"><div class="empty-state"><span class="material-symbols-outlined">workspace_premium</span><p>Selecione um período e clique em Consultar</p></div></div>
+    </div>
+  </div>
+  <div class="tab-content" id="tabApontamento">
+    <div class="card">
+      <div class="card-title"><span class="material-symbols-outlined">assignment_late</span> Apontamento de Turno</div>
+      <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">Registre o motivo quando uma equipe prevista para abrir não abriu o turno.</p>
+      <div class="form-row">
+        <div class="form-group"><label>Data Início</label><input type="date" id="apontamentoStartDate"></div>
+        <div class="form-group"><label>Data Fim</label><input type="date" id="apontamentoEndDate"></div>
+        <div class="form-group" style="display:flex;align-items:flex-end;gap:8px;">
+          <button class="btn btn-primary" onclick="loadApontamentos()"><span class="material-symbols-outlined">search</span> Consultar</button>
+          <button class="btn btn-outline" onclick="setApontamentoCurrentMonth()"><span class="material-symbols-outlined">calendar_month</span> Mês Atual</button>
+        </div>
+      </div>
+      <div id="apontamentoMsg" class="msg"></div>
+      <div id="apontamentoContent"><div class="empty-state"><span class="material-symbols-outlined">assignment_late</span><p>Selecione um período e clique em Consultar</p></div></div>
     </div>
   </div>
 </div>
@@ -938,6 +967,18 @@
         <div class="form-group">
           <label>Fim do Turno</label>
           <input type="time" id="editTeamShiftEnd">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Dias da Semana (para previsão de abertura)</label>
+        <div id="editTeamDays" style="display:flex;gap:6px;flex-wrap:wrap;">
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:500;cursor:pointer;padding:4px 8px;border:1.5px solid var(--border);border-radius:var(--radius-sm);transition:all var(--transition);"><input type="checkbox" name="editTeamDay" value="0"> Dom</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:500;cursor:pointer;padding:4px 8px;border:1.5px solid var(--border);border-radius:var(--radius-sm);transition:all var(--transition);"><input type="checkbox" name="editTeamDay" value="1"> Seg</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:500;cursor:pointer;padding:4px 8px;border:1.5px solid var(--border);border-radius:var(--radius-sm);transition:all var(--transition);"><input type="checkbox" name="editTeamDay" value="2"> Ter</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:500;cursor:pointer;padding:4px 8px;border:1.5px solid var(--border);border-radius:var(--radius-sm);transition:all var(--transition);"><input type="checkbox" name="editTeamDay" value="3"> Qua</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:500;cursor:pointer;padding:4px 8px;border:1.5px solid var(--border);border-radius:var(--radius-sm);transition:all var(--transition);"><input type="checkbox" name="editTeamDay" value="4"> Qui</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:500;cursor:pointer;padding:4px 8px;border:1.5px solid var(--border);border-radius:var(--radius-sm);transition:all var(--transition);"><input type="checkbox" name="editTeamDay" value="5"> Sex</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:500;cursor:pointer;padding:4px 8px;border:1.5px solid var(--border);border-radius:var(--radius-sm);transition:all var(--transition);"><input type="checkbox" name="editTeamDay" value="6"> Sáb</label>
         </div>
       </div>
       <div class="form-group">
