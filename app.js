@@ -3,7 +3,7 @@ var DB_BASE_URL = 'https://babearia-jhosuan-default-rtdb.firebaseio.com';
 
 // Versão atual do app. Ao publicar uma nova versão, atualize ESTE valor,
 // o VERSION em sw.js e o "version" em version.json (devem ser iguais).
-var APP_VERSION = '1.1.0';
+var APP_VERSION = '1.3.0';
 
 // ===== UTILITIES =====
 var currentUser = null;
@@ -123,6 +123,105 @@ function nowTimestamp() {
   return Date.now();
 }
 
+// ===== CACHE DE LEITURA COM TTL (economia de download) =====
+// Reutiliza a MESMA Promise em cache por TTL: painéis que leem o mesmo
+// caminho várias vezes no ciclo de 30s fazem UM único download compartilhado.
+var memoryCache = {};
+var CACHE_TTL = 30000;
+
+function fbCached(path, ttl) {
+  ttl = ttl || CACHE_TTL;
+  var key = path + '|' + ttl;
+  var now = Date.now();
+  var entry = memoryCache[key];
+  if (entry && (now - entry.t) < ttl) return entry.p;
+  var p = OfflineDB.readCached(path, ttl).catch(function(err) {
+    delete memoryCache[key];
+    throw err;
+  });
+  memoryCache[key] = { t: now, p: p };
+  return p;
+}
+
+function clearCachedReads() {
+  memoryCache = {};
+}
+
+// ===== PERÍODO E FUNÇÕES DE ROLE =====
+function formatDate(d) {
+  return d.getFullYear() + '-' +
+    String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    String(d.getDate()).padStart(2, '0');
+}
+
+function currentMonthRange() {
+  var now = new Date();
+  var start = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-01';
+  var end = formatDate(new Date(now.getFullYear(), now.getMonth() + 1, 0));
+  return { start: start, end: end };
+}
+
+function roleLabel(role) {
+  if (role === 'admin') return 'Administrador';
+  if (role === 'supervisor') return 'Supervisor';
+  if (role === 'equipe') return 'Equipe';
+  if (role === 'user') return 'Usuário';
+  return role || '';
+}
+
+// Equipes que o usuário atual pode VISUALIZAR. admin = todas (null).
+function getUserTeamIds() {
+  if (!currentUser) return [];
+  if (currentUser.role === 'admin') return null;
+  if (currentUser.role === 'equipe') return [currentUser.id];
+  var list = [];
+  var map = currentUser.authorized_teams || {};
+  Object.keys(map).forEach(function(k) { if (map[k]) list.push(k); });
+  return list;
+}
+
+// Verifica se um usuário de monitor (supervisor/user) pode ver determinada equipe
+function canViewTeam(userId) {
+  var ids = getUserTeamIds();
+  if (ids === null) return true;
+  return ids.indexOf(userId) !== -1;
+}
+
+function isAdmin() {
+  return !!(currentUser && currentUser.role === 'admin');
+}
+
+function isSupervisor() {
+  return !!(currentUser && currentUser.role === 'supervisor');
+}
+
+function ensureAdmin() {
+  if (isAdmin()) return true;
+  toast('Ação restrita ao administrador', 'error');
+  return false;
+}
+
+// Supervisor e equipe só acessam os últimos 3 dias (hoje até 2 dias atrás).
+// O admin não tem limite de período (null).
+function daysAgoStr(days) {
+  var d = new Date();
+  d.setDate(d.getDate() - days);
+  return formatDate(d);
+}
+
+function getAllowedDateRange() {
+  if (isAdmin()) return null;
+  return { start: daysAgoStr(2), end: todayStr() };
+}
+
+function clampDateToAllowed(value) {
+  var range = getAllowedDateRange();
+  if (!range || !value) return value;
+  if (value < range.start) return range.start;
+  if (value > range.end) return range.end;
+  return value;
+}
+
 // ===== SEED DATA =====
 function seedData() {
   return fbOnce('_initialized').then(function(init) {
@@ -131,7 +230,7 @@ function seedData() {
     if (!navigator.onLine) return;
     var promises = [];
     promises.push(fbPush('users', {
-      username: 'admin', password: 'admin123', role: 'admin',
+      username: 'ARNALDO.LIMA', password: '159753', role: 'admin',
       latitude: '', longitude: '', last_seen: null, created_at: nowTimestamp()
     }));
     var rules = [
@@ -172,7 +271,7 @@ function doLogin() {
     for (var i = 0; i < keys.length; i++) {
       var u = users[keys[i]];
       if (u.username === username && u.password === password) {
-        found = { id: keys[i], username: u.username, role: u.role, shift_start: u.shift_start || '', shift_end: u.shift_end || '' };
+        found = { id: keys[i], username: u.username, role: u.role || 'equipe', shift_start: u.shift_start || '', shift_end: u.shift_end || '', authorized_teams: u.authorized_teams || {} };
         break;
       }
     }
@@ -186,18 +285,121 @@ function doLogin() {
       }
       currentUser = found;
       toast('Bem-vindo, ' + found.username + '!', 'success');
-      if (found.role === 'admin') {
+      if (found.role === 'admin' || found.role === 'supervisor') {
         initAdminView();
+      } else if (found.role === 'user') {
+        initMonitorView(false);
       } else {
         initTeamView();
       }
     } else {
       showMsg('loginMsg', 'error', 'Usuário ou senha inválidos');
     }
-  }).catch(function(err) {
+}).catch(function(err) {
     loading(false);
-    showMsg('loginMsg', 'error', 'Erro de conexão: ' + err.message);
+    toast('Erro ao fazer login: ' + err.message, 'error');
   });
+}
+
+// Compõe as linhas de exportação para uma lista de equipes e período.
+function buildCsvReport(teams, start, end) {
+  return Promise.all([fbCached('services', 60000), fbCached('shift_notes', CACHE_TTL)]).then(function(results) {
+    var allServices = toArray(results[0]);
+    var allNotes = toArray(results[1]);
+    var notesMap = {};
+    allNotes.forEach(function(n) { notesMap[n.team_id + '_' + n.date] = n; });
+    var servicesByTeamDate = {};
+    allServices.forEach(function(s) {
+      if (s.date >= start && s.date <= end) {
+        var key = s.user_id + '_' + s.date;
+        if (!servicesByTeamDate[key]) servicesByTeamDate[key] = [];
+        servicesByTeamDate[key].push(s);
+      }
+    });
+    var filtered = [];
+    var currentDate = new Date(start + 'T00:00:00');
+    var endDateObj = new Date(end + 'T00:00:00');
+    while (currentDate <= endDateObj) {
+      var dateStr = currentDate.getFullYear() + '-' + String(currentDate.getMonth() + 1).padStart(2, '0') + '-' + String(currentDate.getDate()).padStart(2, '0');
+      var dayOfWeek = currentDate.getDay();
+      for (var i = 0; i < teams.length; i++) {
+        var t = teams[i];
+        var key = t.id + '_' + dateStr;
+        var dayServices = servicesByTeamDate[key] || [];
+        var isScheduled = t.days_of_week && t.days_of_week.indexOf(dayOfWeek) !== -1;
+        var classification = '';
+        if (dayServices.length > 0 && isScheduled) {
+          classification = 'Abriu';
+        } else if (dayServices.length === 0 && isScheduled) {
+          classification = 'Não abriu';
+        } else if (dayServices.length > 0 && !isScheduled) {
+          classification = 'Extra';
+        } else {
+          continue;
+        }
+        var noteKey = t.id + '_' + dateStr;
+        var note = notesMap[noteKey];
+        var motivo = (note && note.reason) ? note.reason : '';
+        if (dayServices.length > 0) {
+          for (var j = 0; j < dayServices.length; j++) {
+            var s = dayServices[j];
+            filtered.push({
+              equipe: t.username || 'Desconhecido',
+              servico: s.service_name,
+              ups: s.ups_value,
+              quantidade: s.quantity,
+              valor_total: s.total_money,
+              nota: s.grade,
+              data: s.date,
+              meta_diaria: t.goal_money || 0,
+              classificacao: classification,
+              motivo: motivo,
+              latitude: s.latitude,
+              longitude: s.longitude,
+              endereco_equipe: t.address || ''
+            });
+          }
+        } else {
+          filtered.push({
+            equipe: t.username || 'Desconhecido',
+            servico: '',
+            ups: 0,
+            quantidade: 0,
+            valor_total: 0,
+            nota: '',
+            data: dateStr,
+            meta_diaria: t.goal_money || 0,
+            classificacao: classification,
+            motivo: motivo,
+            latitude: '',
+            longitude: '',
+            endereco_equipe: t.address || ''
+          });
+        }
+      }
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+    return filtered;
+  });
+}
+
+function downloadCsv(filtered, filename) {
+  var csv = '\uFEFF';
+  var headers = Object.keys(filtered[0]);
+  csv += headers.join(';') + '\n';
+  for (var i = 0; i < filtered.length; i++) {
+    var row = headers.map(function(h) { return '"' + String(filtered[i][h]).replace(/"/g, '""') + '"'; });
+    csv += row.join(';') + '\n';
+  }
+  var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  var link = document.createElement('a');
+  link.setAttribute('href', URL.createObjectURL(blob));
+  link.setAttribute('download', filename);
+  link.style.visibility = 'hidden';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  toast('Exportação concluída!', 'success');
 }
 
 function toggleFullscreen() {
@@ -476,10 +678,10 @@ function addTeamService() {
   totalMoney = qty * (svc.money_value || 0);
 
   loading(true);
-  fbOnce('services').then(function(allServices) {
-    var arr = toArray(allServices);
-    var duplicateGrade = arr.some(function(s) {
-      return s.user_id === currentUser.id && s.grade === nota && s.grade > 0;
+  // Consulta no servidor APENAS os serviços desta equipe (economia de download)
+  OfflineDB.query('services', { orderBy: 'user_id', equalTo: currentUser.id, limitToLast: 2000 }).then(function(arr) {
+    var duplicateGrade = (arr || []).some(function(s) {
+      return s.grade === nota && s.grade > 0;
     });
     if (duplicateGrade) {
       loading(false);
@@ -740,12 +942,14 @@ function shiftMiniBar(user) {
 
 // ===== DATA FUNCTIONS =====
 function getTeamSummary(userId, startDate, endDate) {
-  return Promise.all([fbOnce('services'), fbOnce('users/' + userId)]).then(function(results) {
+  return Promise.all([
+    OfflineDB.query('services', { orderBy: 'user_id', equalTo: userId, limitToLast: 4000 }).catch(function() { return []; }),
+    fbCached('users/' + userId, CACHE_TTL)
+  ]).then(function(results) {
     var allServices = results[0];
     var userData = results[1];
-    var arr = toArray(allServices);
-    var filtered = arr.filter(function(s) {
-      return s.user_id === userId && s.date >= startDate && s.date <= endDate;
+    var filtered = allServices.filter(function(s) {
+      return s.date >= startDate && s.date <= endDate;
     });
     var services = filtered.map(function(s) { return formatService(s); });
     var totalUps = services.reduce(function(sum, sv) { return sum + sv.upsValue; }, 0);
@@ -763,10 +967,10 @@ function getTeamSummary(userId, startDate, endDate) {
 }
 
 function getAllTeamsSummaryForPeriod(startDate, endDate) {
-  return Promise.all([fbOnce('users'), fbOnce('services')]).then(function(results) {
+  return Promise.all([fbCached('users', CACHE_TTL), fbCached('services', CACHE_TTL)]).then(function(results) {
     var users = toArray(results[0]);
     var allServices = toArray(results[1]);
-    return users.filter(function(u) { return u.role !== 'admin'; }).map(function(user) {
+    return users.filter(function(u) { return u.role !== 'admin' && canViewTeam(u.id); }).map(function(user) {
       var svcs = allServices.filter(function(s) {
         return s.user_id === user.id && s.date >= startDate && s.date <= endDate;
       });
@@ -793,11 +997,11 @@ function getAllTeamsSummaryForPeriod(startDate, endDate) {
 function loadStatistics() {
   var start = $('adminStartDate').value;
   var end = $('adminEndDate').value;
-  Promise.all([fbOnce('services'), fbOnce('users'), fbOnce('catalog_services')]).then(function(results) {
+  Promise.all([fbCached('services', CACHE_TTL), fbCached('users', CACHE_TTL), fbCached('catalog_services', 60000)]).then(function(results) {
     var allServices = toArray(results[0]);
     var users = toArray(results[1]);
     var catalog = toArray(results[2]);
-    var filtered = allServices.filter(function(s) { return s.date >= start && s.date <= end; });
+    var filtered = allServices.filter(function(s) { return s.date >= start && s.date <= end && canViewTeam(s.user_id); });
 
     var totalUps = filtered.reduce(function(s, sv) { return s + (sv.ups_value || 0); }, 0);
     var totalMoney = filtered.reduce(function(s, sv) { return s + (sv.total_money || 0); }, 0);
@@ -966,25 +1170,554 @@ function logout() {
   if (window.heartbeatInterval) clearInterval(window.heartbeatInterval);
   stopLocationTracking();
   currentUser = null;
+  monitorLocked = false;
   celebratedTeams = new Set();
+  clearCachedReads();
   showView('loginView');
   toast('Sessão encerrada', 'info');
 }
 
+// ===== MONITOR VIEW (SUPERVISOR / USUÁRIO) =====
+// O supervisor tem a visão TRAVADA no mês vigente (sem seletor de data).
+// O usuário (role 'user') pode escolher o período livremente.
+var monitorLocked = false;
+
+function initMonitorView(locked) {
+  monitorLocked = !!locked;
+  $('monUserName').textContent = currentUser.username + ' · ' + roleLabel(currentUser.role);
+  var range = getMonitorRange();
+  $('monPeriod').textContent = formatDateBr(range.start) + ' a ' + formatDateBr(range.end) + (monitorLocked ? ' · Mês vigente' : '');
+  var banner = $('monLockBanner');
+  var filters = $('monFilters');
+  if (monitorLocked) {
+    if (banner) banner.style.display = 'flex';
+    if (filters) filters.style.display = 'none';
+  } else {
+    if (banner) banner.style.display = 'none';
+    if (filters) {
+      filters.style.display = 'flex';
+      $('monStartDate').value = range.start;
+      $('monEndDate').value = range.end;
+    }
+  }
+  showView('monitorView');
+  loadMonitorView();
+  if (refreshInterval) clearInterval(refreshInterval);
+  refreshInterval = setInterval(loadMonitorView, 30000);
+}
+
+// Supervisor: sempre o mês vigente (bloqueado). Usuário: período selecionado.
+function getMonitorRange() {
+  if (monitorLocked) return currentMonthRange();
+  var start = $('monStartDate') && $('monStartDate').value;
+  var end = $('monEndDate') && $('monEndDate').value;
+  if (!start || !end) return currentMonthRange();
+  return { start: start, end: end };
+}
+
+// Equipes autorizadas do usuário atual (sem admin)
+function getMonitorTeamUsers() {
+  return fbCached('users', CACHE_TTL).then(function(users) {
+    var arr = toArray(users);
+    var teams = arr.filter(function(u) { return u.role === 'equipe'; });
+    var ids = getUserTeamIds();
+    if (ids === null) return teams;
+    var idMap = {};
+    ids.forEach(function(i) { idMap[i] = true; });
+    return teams.filter(function(u) { return idMap[u.id]; });
+  });
+}
+
+function loadMonitorView() {
+  if (!currentUser) return;
+  var range = getMonitorRange();
+  var periodEl = $('monPeriod');
+  if (periodEl) periodEl.textContent = formatDateBr(range.start) + ' a ' + formatDateBr(range.end) + (monitorLocked ? ' · Mês vigente' : '');
+  loading(true);
+  Promise.all([fbCached('rules', CACHE_TTL), getMonitorTeamUsers(), fbCached('catalog_services', 60000)]).then(function(results) {
+    var rules = toArray(results[0]);
+    if (rules.length) {
+      rulesCache = rules.map(function(r) {
+        return { id: r.id, class: r.class, minUps: r.min_ups, maxUps: r.max_ups, color: r.color };
+      });
+    }
+    var teams = results[1];
+    loadMonitorServices(teams, range.start, range.end);
+  }).catch(function(err) {
+    loading(false);
+    console.error('Erro ao carregar monitor:', err);
+  });
+}
+
+// Baixa APENAS os serviços das equipes vinculadas (query no servidor)
+// e filtra o período no cliente (o RTDB não combina orderBy com faixa de data).
+function loadMonitorServices(teams, start, end) {
+  var teamIds = teams.map(function(t) { return t.id; });
+  if (teamIds.length === 0) {
+    loading(false);
+    renderMonitorSummary([]);
+    renderMonitorTeams([]);
+    return;
+  }
+  var queries = teamIds.map(function(id) {
+    return OfflineDB.query('services', { orderBy: 'user_id', equalTo: id, limitToLast: 3000 }).catch(function() { return []; });
+  });
+  Promise.all(queries).then(function(results) {
+    loading(false);
+    var teamsData = teams.map(function(team, i) {
+      var recs = results[i] || [];
+      var svcs = recs.filter(function(s) { return s.date >= start && s.date <= end; });
+      var services = svcs.map(function(s) { return formatService(s); });
+      var totalUps = services.reduce(function(sum, sv) { return sum + sv.upsValue; }, 0);
+      var totalMoney = services.reduce(function(sum, sv) { return sum + (sv.totalMoney || 0); }, 0);
+      var classInfo = getClassification(totalUps);
+      return {
+        userId: team.id, username: team.username,
+        supervisor: team.supervisor || '',
+        goal_money: team.goal_money || 0,
+        shift_start: team.shift_start || '', shift_end: team.shift_end || '',
+        latitude: team.latitude || '', longitude: team.longitude || '',
+        address: team.address || '', lastSeen: team.last_seen || null,
+        services: services, totalUps: totalUps, totalMoney: totalMoney,
+        class: classInfo.class, color: classInfo.color, count: services.length
+      };
+    });
+    renderMonitorSummary(teamsData);
+    renderMonitorTeams(teamsData);
+  }).catch(function(err) {
+    loading(false);
+    console.error('Erro ao carregar serviços do monitor:', err);
+  });
+}
+
+function renderMonitorSummary(teamsData) {
+  var container = $('monSummaries');
+  if (!container) return;
+  if (!teamsData || teamsData.length === 0) {
+    container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">groups</span><p>Nenhuma equipe vinculada. Procure o administrador.</p></div>';
+    return;
+  }
+  var totalUps = teamsData.reduce(function(s, t) { return s + t.totalUps; }, 0);
+  var totalMoney = teamsData.reduce(function(s, t) { return s + t.totalMoney; }, 0);
+  var totalCount = teamsData.reduce(function(s, t) { return s + t.count; }, 0);
+  var gradeCount = 0;
+  teamsData.forEach(function(t) {
+    t.services.forEach(function(s) { if (s.grade > 0) gradeCount++; });
+  });
+  var html = '<div class="stats-overview">' +
+    '<div class="stat-box"><span class="stat-box-icon teams"><span class="material-symbols-outlined">groups</span></span><div><div class="stat-box-value">' + teamsData.length + '</div><div class="stat-box-label">Equipes</div></div></div>' +
+    '<div class="stat-box"><span class="stat-box-icon ups"><span class="material-symbols-outlined">trending_up</span></span><div><div class="stat-box-value">' + totalUps + '</div><div class="stat-box-label">Total UPS</div></div></div>' +
+    '<div class="stat-box"><span class="stat-box-icon money"><span class="material-symbols-outlined">payments</span></span><div><div class="stat-box-value">' + fmtMoney(totalMoney) + '</div><div class="stat-box-label">Total R$</div></div></div>' +
+    '<div class="stat-box"><span class="stat-box-icon services"><span class="material-symbols-outlined">assignment</span></span><div><div class="stat-box-value">' + totalCount + '</div><div class="stat-box-label">Serviços</div></div></div>' +
+    '<div class="stat-box"><span class="stat-box-icon grade"><span class="material-symbols-outlined">star</span></span><div><div class="stat-box-value">' + gradeCount + '</div><div class="stat-box-label">Notas</div></div></div>' +
+    '</div>';
+  container.innerHTML = html;
+}
+
+function renderMonitorTeams(teamsData) {
+  var container = $('monTeamsContent');
+  if (!container) return;
+  if (!teamsData || teamsData.length === 0) {
+    container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">groups</span><p>Nenhuma equipe vinculada à sua conta.</p></div>';
+    return;
+  }
+  var sorted = teamsData.slice().sort(function(a, b) { return b.totalUps - a.totalUps; });
+  var html = '';
+  for (var i = 0; i < sorted.length; i++) {
+    var t = sorted[i];
+    var medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '#' + (i + 1);
+    var color = t.color || '#94a3b8';
+    var statusInfo = getStatusInfo(t.lastSeen);
+    var accId = 'monAcc_' + i;
+    var goalPct = t.goal_money > 0 ? Math.min(100, Math.round((t.totalMoney / t.goal_money) * 100)) : 0;
+    html += '<div class="card" style="margin-bottom:8px;overflow:hidden;">';
+    html += '<div class="ranking-item" style="cursor:pointer;padding:12px 14px;margin:0;border:none;border-radius:0;" onclick="toggleMonitorTeam(\'' + accId + '\')">' +
+      '<div class="ranking-pos">' + medal + '</div>' +
+      '<div class="badge badge-sm" style="background:' + color + ';">' + t.class + '</div>' +
+      '<div class="ranking-info">' +
+      '<div class="ranking-name">' + escapeHtml(t.username) + '</div>' +
+      '<div class="ranking-status ' + statusInfo.className + '"><span class="status-dot"></span><span class="status-label">' + statusInfo.label + '</span></div>' +
+      (t.goal_money > 0 ? '<div style="margin-top:4px;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;"><span style="font-size:10px;color:var(--text-muted);">Meta: ' + fmtMoney(t.goal_money) + '</span><span style="font-size:10px;font-weight:700;color:var(--money);">' + goalPct + '%</span></div><div style="width:100%;height:6px;background:var(--border);border-radius:3px;overflow:hidden;"><div style="height:100%;background:var(--money);border-radius:3px;width:' + goalPct + '%;"></div></div></div>' : '') +
+      '</div>' +
+      '<div class="ranking-stats">' +
+      '<div class="ranking-ups">' + t.totalUps + ' UPS</div>' +
+      (t.totalMoney ? '<div class="ranking-money">' + fmtMoney(t.totalMoney) + '</div>' : '') +
+      '<div class="ranking-count">' + t.count + ' servi\u00E7o' + (t.count !== 1 ? 's' : '') + '</div>' +
+      '</div>' +
+      '</div>';
+    var srvHtml = '<div id="' + accId + '" style="display:none;">';
+    if (t.services && t.services.length) {
+      srvHtml += '<div class="table-wrap"><table><thead><tr><th>Data</th><th>Serviço</th><th class="num">Qtd</th><th class="num">UPS</th><th class="num">R$</th><th class="num">Nota</th></tr></thead><tbody>';
+      for (var j = 0; j < t.services.length; j++) {
+        var s = t.services[j];
+        srvHtml += '<tr>' +
+          '<td class="date" style="white-space:nowrap;">' + formatDateBr(s.date) + '</td>' +
+          '<td>' + escapeHtml(s.serviceName) + '</td>' +
+          '<td class="num">' + s.quantity + '</td>' +
+          '<td class="num" style="font-weight:700;color:var(--primary);">' + fmtUps(s.upsValue) + '</td>' +
+          '<td class="num" style="font-weight:600;color:var(--money);">' + (s.totalMoney ? fmtMoney(s.totalMoney) : '-') + '</td>' +
+          '<td class="num">' + (s.grade || '-') + '</td>' +
+          '</tr>';
+      }
+      srvHtml += '</tbody></table></div>';
+    } else {
+      srvHtml += '<div class="empty-state"><p>Nenhum servi\u00E7o no per\u00EDodo</p></div>';
+    }
+    srvHtml += '</div>';
+    html += srvHtml + '</div>';
+  }
+  container.innerHTML = html;
+}
+
+function toggleMonitorTeam(accId) {
+  var el = $(accId);
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+function exportMonitorData() {
+  var range = getMonitorRange();
+  if (!range.start || !range.end) { toast('Selecione o período', 'error'); return; }
+  loading(true);
+  getMonitorTeamUsers().then(function(teams) {
+    return buildCsvReport(teams, range.start, range.end);
+  }).then(function(filtered) {
+    loading(false);
+    if (!filtered || filtered.length === 0) { toast('Nenhum dado para exportar no período', 'info'); return; }
+    downloadCsv(filtered, 'exportacao_ups_' + range.start + '_to_' + range.end + '.csv');
+  }).catch(function(err) {
+    loading(false);
+    toast('Erro ao exportar: ' + err.message, 'error');
+  });
+}
+
+// ===== ADMIN: USUÁRIOS E SUPERVISORES =====
+function populateSupervisorSelect(selectId, selectedId) {
+  var sel = $(selectId);
+  if (!sel) return;
+  var supervisors = userCache.filter(function(u) { return u.role === 'supervisor'; });
+  var current = selectedId || sel.value || '';
+  sel.innerHTML = '<option value="">— Sem supervisor —</option>';
+  supervisors.forEach(function(s) {
+    var selAttr = (s.id === current) ? ' selected' : '';
+    sel.innerHTML += '<option value="' + s.id + '"' + selAttr + '>' + escapeHtml(s.username) + '</option>';
+  });
+  sel.value = current;
+}
+
+function getCheckedTeams(containerId) {
+  var container = $(containerId);
+  var ids = [];
+  if (!container) return ids;
+  var boxes = container.querySelectorAll('input[type="checkbox"]:checked');
+  for (var i = 0; i < boxes.length; i++) ids.push(boxes[i].value);
+  return ids;
+}
+
+function populateTeamChecklist(containerId, selectedMap) {
+  var container = $(containerId);
+  if (!container) return;
+  var teams = userCache.filter(function(u) { return u.role === 'equipe'; });
+  if (!teams.length) {
+    container.innerHTML = '<div class="empty-state" style="padding:8px;">Nenhuma equipe cadastrada</div>';
+    return;
+  }
+  var html = '';
+  teams.forEach(function(t) {
+    var checked = selectedMap && selectedMap[t.id] ? ' checked' : '';
+    var boxId = containerId + '_' + t.id;
+    html += '<div class="activity-item"><input type="checkbox" value="' + t.id + '" id="' + boxId + '"' + checked + '>' +
+      '<label for="' + boxId + '" style="font-size:12px;cursor:pointer;">' + escapeHtml(t.username) + '</label></div>';
+  });
+  container.innerHTML = html;
+}
+
+function populateAdminForms() {
+  fbCached('users', CACHE_TTL).then(function(users) {
+    userCache = toArray(users);
+    populateSupervisorSelect('newTeamSupervisor', '');
+    populateTeamChecklist('newUserTeams', null);
+  }).catch(function() {});
+}
+
+// Vincula/desvincula uma equipe a uma conta de supervisor (em ambos os sentidos).
+// Su-pervisores atualizam também o campo supervisor_id/supervisor da equipe;
+// usuários visualizadores só recebem a permissão de visualização.
+function linkTeamToSupervisor(supId, teamId, link) {
+  if (!supId) return Promise.resolve();
+  return fbOnce('users/' + supId).then(function(sup) {
+    if (!sup) return;
+    var name = sup.username || supId;
+    var auth = sup.authorized_teams || {};
+    if (link) {
+      auth[teamId] = true;
+    } else {
+      delete auth[teamId];
+    }
+    var ops = [fbUpdate('users/' + supId, { authorized_teams: auth })];
+    if (sup.role === 'supervisor') {
+      if (link) {
+        ops.push(fbUpdate('users/' + teamId, { supervisor_id: supId, supervisor: name }));
+      } else {
+        ops.push(fbOnce('users/' + teamId).then(function(team) {
+          if (team && team.supervisor_id === supId) {
+            return fbUpdate('users/' + teamId, { supervisor_id: '', supervisor: '' });
+          }
+        }));
+      }
+    }
+    return Promise.all(ops);
+  });
+}
+
+function createUser() {
+  if (!ensureAdmin()) return;
+  var name = $('newUserName').value.trim();
+  var pass = $('newUserPass').value.trim();
+  var role = $('newUserRole').value;
+  if (!name || !pass) { showMsg('userFormMsg', 'error', 'Preencha nome de usuário e senha'); return; }
+  clearMsg('userFormMsg');
+  var teamIds = getCheckedTeams('newUserTeams');
+  loading(true);
+  fbOnce('users').then(function(users) {
+    var arr = toArray(users);
+    var exists = arr.some(function(u) { return u.username === name; });
+    if (exists) {
+      loading(false);
+      showMsg('userFormMsg', 'error', 'Nome de usuário já existe');
+      return;
+    }
+    var userData = {
+      username: name, password: pass, role: role,
+      authorized_teams: {},
+      created_at: nowTimestamp(),
+      created_by: currentUser ? currentUser.id : ''
+    };
+    teamIds.forEach(function(tid) { userData.authorized_teams[tid] = true; });
+    return fbPush('users', userData).then(function(key) {
+      var chain = Promise.resolve();
+      teamIds.forEach(function(tid) {
+        chain = chain.then(function() { return linkTeamToSupervisor(key, tid, true); });
+      });
+      return chain;
+    });
+  }).then(function() {
+    loading(false);
+    $('newUserName').value = '';
+    $('newUserPass').value = '';
+    toast('Usuário cadastrado com sucesso!', 'success');
+    clearCachedReads();
+    loadAllAdminData();
+    loadUsersList();
+  }).catch(function(err) {
+    loading(false);
+    showMsg('userFormMsg', 'error', 'Erro: ' + err.message);
+  });
+}
+
+function loadUsersList() {
+  fbCached('users', CACHE_TTL).then(function(users) {
+    renderUsersList(toArray(users));
+  });
+}
+
+function renderUsersList(users) {
+  var container = $('usersList');
+  if (!container) return;
+  var managers = users.filter(function(u) { return u.role === 'supervisor' || u.role === 'user'; });
+  if (managers.length === 0) {
+    container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">manage_accounts</span><p>Nenhum usuário ou supervisor cadastrado</p></div>';
+    return;
+  }
+  var teamsMap = {};
+  users.forEach(function(t) { if (t.role === 'equipe') teamsMap[t.id] = t.username; });
+  var isSup = isSupervisor();
+  var html = '<div class="table-wrap"><table><thead><tr><th>Usuário</th><th>Perfil</th><th>Equipes vinculadas</th>' + (isSup ? '' : '<th>Ações</th>') + '</tr></thead><tbody>';
+  for (var i = 0; i < managers.length; i++) {
+    var u = managers[i];
+    var links = [];
+    var auth = u.authorized_teams || {};
+    Object.keys(auth).forEach(function(tid) {
+      if (auth[tid] && teamsMap[tid]) links.push('<span class="tag tag-active">' + escapeHtml(teamsMap[tid]) + '</span>');
+    });
+    var band = links.length ? links.join(' ') : '<span style="color:var(--text-muted);">Nenhuma equipe</span>';
+    html += '<tr>' +
+      '<td><strong>' + escapeHtml(u.username) + '</strong></td>' +
+      '<td><span class="tag ' + (u.role === 'supervisor' ? 'tag-active' : 'tag-inactive') + '">' + roleLabel(u.role) + '</span></td>' +
+      '<td>' + band + '</td>' +
+      (isSup ? '' : '<td class="actions">' +
+      '<button class="btn btn-sm btn-outline" onclick="editUser(\'' + u.id + '\')"><span class="material-symbols-outlined">edit</span> Editar</button>' +
+      '<button class="btn btn-sm btn-danger" onclick="deleteUser(\'' + u.id + '\')"><span class="material-symbols-outlined">delete</span></button>' +
+      '</td>') +
+      '</tr>';
+  }
+  html += '</tbody></table></div>';
+  container.innerHTML = html;
+}
+
+function editUser(id) {
+  loading(true);
+  fbOnce('users/' + id).then(function(user) {
+    loading(false);
+    if (!user) { toast('Usuário não encontrado', 'error'); return; }
+    $('editUserId').value = id;
+    $('editUserName').value = user.username || '';
+    $('editUserRole').value = (user.role === 'user') ? 'user' : 'supervisor';
+    $('editUserPass').value = '';
+    populateTeamChecklist('editUserTeams', user.authorized_teams || {});
+    clearMsg('editUserMsg');
+    $('editUserModal').style.display = 'flex';
+  }).catch(function(err) {
+    loading(false);
+    toast('Erro: ' + err.message, 'error');
+  });
+}
+
+function saveEditUser() {
+  if (!ensureAdmin()) return;
+  var id = $('editUserId').value;
+  var name = $('editUserName').value.trim();
+  var role = $('editUserRole').value;
+  var pass = $('editUserPass').value.trim();
+  if (!name) { showMsg('editUserMsg', 'error', 'O nome de usuário é obrigatório'); return; }
+  clearMsg('editUserMsg');
+  var teamIds = getCheckedTeams('editUserTeams');
+  loading(true);
+  fbOnce('users/' + id).then(function(user) {
+    var prevMap = (user && user.authorized_teams) || {};
+    var updateData = { username: name, role: role };
+    if (pass && pass.length >= 3) updateData.password = pass;
+    var auth = {};
+    teamIds.forEach(function(tid) { auth[tid] = true; });
+    updateData.authorized_teams = auth;
+    return fbUpdate('users/' + id, updateData).then(function() {
+      var added = teamIds.filter(function(tid) { return !prevMap[tid]; });
+      var removed = Object.keys(prevMap).filter(function(tid) { return teamIds.indexOf(tid) === -1; });
+      var chain = Promise.resolve();
+      added.forEach(function(tid) { chain = chain.then(function() { return linkTeamToSupervisor(id, tid, true); }); });
+      removed.forEach(function(tid) { chain = chain.then(function() { return linkTeamToSupervisor(id, tid, false); }); });
+      return chain;
+    });
+  }).then(function() {
+    loading(false);
+    toast('Usuário atualizado com sucesso!', 'success');
+    closeEditUserModal();
+    clearCachedReads();
+    loadAllAdminData();
+    loadUsersList();
+  }).catch(function(err) {
+    loading(false);
+    showMsg('editUserMsg', 'error', 'Erro: ' + err.message);
+  });
+}
+
+function deleteUser(id) {
+  if (!ensureAdmin()) return;
+  if (!confirm('Excluir este usuário? As equipes vinculadas deixarão de ser visíveis para ele.')) return;
+  loading(true);
+  fbOnce('users/' + id).then(function(user) {
+    var auth = (user && user.authorized_teams) || {};
+    var teamIds = Object.keys(auth).filter(function(k) { return auth[k]; });
+    var chain = Promise.resolve();
+    teamIds.forEach(function(tid) {
+      chain = chain.then(function() { return linkTeamToSupervisor(id, tid, false); });
+    });
+    return chain.then(function() { return fbRemove('users/' + id); });
+  }).then(function() {
+    loading(false);
+    toast('Usuário excluído', 'info');
+    clearCachedReads();
+    loadAllAdminData();
+    loadUsersList();
+  }).catch(function(err) {
+    loading(false);
+    toast('Erro: ' + err.message, 'error');
+  });
+}
+
+function closeEditUserModal() {
+  $('editUserModal').style.display = 'none';
+}
+
+function cleanupLocationHistory() {
+  if (!ensureAdmin()) return;
+  if (!confirm('Remover histórico de localização com mais de 30 dias? Isso libera espaço no banco e no dispositivo.')) return;
+  loading(true);
+  OfflineDB.pruneLocationHistory(30).then(function(res) {
+    loading(false);
+    toast('Localização antiga removida (' + ((res && res.removed) || 0) + ' registros).', 'success');
+    updateSyncStatus();
+  }).catch(function(err) {
+    loading(false);
+    toast('Erro: ' + err.message, 'error');
+  });
+}
+
+function cleanupLocalRetention() {
+  if (!ensureAdmin()) return;
+  loading(true);
+  OfflineDB.prune({ servicesDays: 365, locationDays: 30 }).then(function() {
+    loading(false);
+    toast('Retenção local aplicada: serviços > 365 dias e localização > 30 dias removidos.', 'success');
+  }).catch(function(err) {
+    loading(false);
+    toast('Erro: ' + err.message, 'error');
+  });
+}
+
+function refreshCachedData() {
+  if (!ensureAdmin()) return;
+  clearCachedReads();
+  toast('Cache de leitura invalidado. Próxima atualização busca dados novos.', 'info');
+  loadAllAdminData();
+}
+
 // ===== ADMIN VIEW =====
+function applyDateRangeTo(id) {
+  var el = $(id);
+  if (!el) return;
+  var range = getAllowedDateRange();
+  if (range) {
+    el.min = range.start;
+    el.max = range.end;
+  } else {
+    el.removeAttribute('min');
+    el.removeAttribute('max');
+  }
+}
+
+// Aplica restrições visuais/de período para supervisor (somente visualização,
+// dados das próprias equipes e últimos 3 dias).
+function applyAdminRestrictions() {
+  var isSup = isSupervisor();
+
+  ['adminStartDate', 'adminEndDate', 'auditoriaStartDate', 'auditoriaEndDate',
+   'classificacaoStartDate', 'classificacaoEndDate', 'apontamentoStartDate', 'apontamentoEndDate']
+    .forEach(applyDateRangeTo);
+
+  [['newTeamCard', isSup], ['newUserCard', isSup], ['maintenanceCard', isSup],
+   ['newCatalogCard', isSup], ['rulesAddActions', isSup], ['rulesSaveBtn', isSup]]
+    .forEach(function(pair) {
+      var el = $(pair[0]);
+      if (el) el.style.display = pair[1] ? 'none' : '';
+    });
+}
+
 function initAdminView() {
   var today = todayStr();
-  $('adminStartDate').value = today;
-  $('adminEndDate').value = today;
+  var isSup = isSupervisor();
+  $('adminStartDate').value = clampDateToAllowed(today);
+  $('adminEndDate').value = clampDateToAllowed(today);
   $('adminDate').textContent = formatDateBr(today);
+  applyAdminRestrictions();
   showView('adminView');
   initTabs();
   loadAllAdminData();
+  populateAdminForms();
   if (refreshInterval) clearInterval(refreshInterval);
   refreshInterval = setInterval(loadAllAdminData, 30000);
   $('adminStartDate').addEventListener('change', loadAllAdminData);
   $('adminEndDate').addEventListener('change', loadAllAdminData);
-  setTimeout(captureAdminLocation, 500);
+  if (!isSup) setTimeout(captureAdminLocation, 500);
 }
 
 function initTabs() {
@@ -998,6 +1731,17 @@ function initTabs() {
       if (activeContent) activeContent.classList.remove('active');
       var tabId = this.getAttribute('data-tab');
       $(tabId).classList.add('active');
+      if (tabId === 'tabEquipes') {
+        loadTeamsList();
+        populateAdminForms();
+      }
+      if (tabId === 'tabUsuarios') {
+        loadUsersList();
+        populateAdminForms();
+      }
+      if (tabId === 'tabServicos') {
+        loadCatalogList();
+      }
       if (tabId === 'tabMapa') {
         setTimeout(initMap, 100);
       }
@@ -1024,21 +1768,35 @@ function initTabs() {
 }
 
 function loadAllAdminData() {
-  var start = $('adminStartDate').value;
-  var end = $('adminEndDate').value;
-  fbOnce('rules').then(function(rules) {
+  var start = clampDateToAllowed($('adminStartDate').value);
+  var end = clampDateToAllowed($('adminEndDate').value);
+  $('adminStartDate').value = start;
+  $('adminEndDate').value = end;
+  fbCached('rules', CACHE_TTL).then(function(rules) {
     rulesCache = toArray(rules).map(function(r) {
       return { id: r.id, class: r.class, minUps: r.min_ups, maxUps: r.max_ups, color: r.color };
     });
     loadPainel(start, end);
   });
-  fbOnce('users').then(function(users) {
+  fbCached('users', CACHE_TTL).then(function(users) {
     userCache = toArray(users);
+    syncCurrentUserAutorizations();
   });
   loadTeamsList();
   loadCatalogList();
   loadMapData(start, end);
   loadStatistics();
+}
+
+// Mantém as autorizações do supervisor atualizadas em tempo real (equipes
+// vinculadas pelo admin sem precisar reentrar).
+function syncCurrentUserAutorizations() {
+  if (!currentUser || currentUser.role !== 'supervisor') return;
+  if (!userCache || !userCache.length) return;
+  var self = userCache.find(function(u) { return u.id === currentUser.id; });
+  if (self) {
+    currentUser.authorized_teams = self.authorized_teams || {};
+  }
 }
 
 // --- Painel ---
@@ -1122,21 +1880,23 @@ function renderPainel(data) {
 
 // --- Equipes ---
 function loadTeamsList() {
-  fbOnce('users').then(function(users) {
-    var arr = toArray(users);
-    renderTeamsList(arr);
+  fbCached('users', CACHE_TTL).then(function(users) {
+    userCache = toArray(users);
+    renderTeamsList(userCache);
   });
 }
 
 function renderTeamsList(users) {
   var container = $('teamsList');
-  var teams = users.filter(function(u) { return u.role !== 'admin'; });
+  var isSup = isSupervisor();
+  var teams = users.filter(function(u) { return u.role !== 'admin' && canViewTeam(u.id); });
   if (teams.length === 0) {
-    container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">groups</span><p>Nenhuma equipe cadastrada</p></div>';
+    container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">groups</span><p>' +
+      (isSup ? 'Nenhuma equipe vinculada à sua conta' : 'Nenhuma equipe cadastrada') + '</p></div>';
     return;
   }
   var dayNames = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
-  var html = '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Nome</th><th>Supervisor</th><th>Meta R$</th><th>Status</th><th>Função</th><th>Turno</th><th>Dias</th><th>Localização</th><th>Ações</th></tr></thead><tbody>';
+  var html = '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Nome</th><th>Supervisor</th><th>Meta R$</th><th>Status</th><th>Função</th><th>Turno</th><th>Dias</th><th>Localização</th>' + (isSup ? '' : '<th>Ações</th>') + '</tr></thead><tbody>';
   for (var i = 0; i < teams.length; i++) {
     var t = teams[i];
     var statusInfo = getStatusInfo(t.last_seen);
@@ -1174,10 +1934,11 @@ function renderTeamsList(users) {
       '<td>' + shiftDisplay + shiftStatus + '</td>' +
       '<td>' + daysDisplay + '</td>' +
       '<td>' + locDisplay + '</td>' +
-      '<td class="actions">' +
+      (isSup ? '' : '<td class="actions">' +
       '<button class="btn btn-sm btn-outline" onclick="editTeam(\'' + t.id + '\')"><span class="material-symbols-outlined">edit</span> Editar</button>' +
       '<button class="btn btn-sm btn-danger" onclick="deleteTeam(\'' + t.id + '\')"><span class="material-symbols-outlined">delete</span></button>' +
-      '</td></tr>';
+      '</td>') +
+      '</tr>';
   }
   html += '</tbody></table></div>';
   container.innerHTML = html;
@@ -1204,9 +1965,10 @@ function setSelectedDaysOfWeek(days) {
 }
 
 function createTeam() {
+  if (!ensureAdmin()) return;
   var name = $('newTeamName').value.trim();
   var pass = $('newTeamPass').value.trim();
-  var supervisor = $('newTeamSupervisor').value.trim();
+  var supId = $('newTeamSupervisor').value;
   var goalRaw = $('newTeamGoal').value;
   var goalMoney = parseFloat(goalRaw) || 0;
   var shiftStart = $('newTeamShiftStart').value;
@@ -1230,9 +1992,11 @@ function createTeam() {
       showMsg('teamFormMsgAdmin', 'error', 'Nome de usuário já existe');
       return;
     }
+    var supUser = supId ? arr.find(function(u) { return u.id === supId; }) : null;
     var userData = {
       username: name, password: pass, role: 'equipe',
-      supervisor: supervisor || '',
+      supervisor_id: supUser ? supId : '',
+      supervisor: supUser ? supUser.username : '',
       goal_money: goalMoney,
       shift_start: shiftStart || '',
       shift_end: shiftEnd || '',
@@ -1246,6 +2010,11 @@ function createTeam() {
       registered_at: nowTimestamp()
     };
     return fbPush('users', userData).then(function(key) {
+      var linkChain = supUser
+        ? linkTeamToSupervisor(supId, key, true)
+        : Promise.resolve();
+      return linkChain.then(function() { return key; });
+    }).then(function(key) {
       loading(false);
       $('newTeamName').value = '';
       $('newTeamPass').value = '';
@@ -1272,9 +2041,16 @@ function createTeam() {
 }
 
 function deleteTeam(id) {
+  if (!ensureAdmin()) return;
   if (!confirm('Excluir esta equipe?')) return;
   loading(true);
-  fbRemove('users/' + id).then(function() {
+  fbOnce('users/' + id).then(function(user) {
+    var supId = user && user.supervisor_id;
+    var unlink = supId ? linkTeamToSupervisor(supId, id, false) : Promise.resolve();
+    return unlink.then(function() {
+      return fbRemove('users/' + id);
+    });
+  }).then(function() {
     loading(false);
     toast('Equipe excluída', 'info');
     loadAllAdminData();
@@ -1285,6 +2061,7 @@ function deleteTeam(id) {
 }
 
 function showResetPass(id) {
+  if (!ensureAdmin()) return;
   var newPass = prompt('Nova senha para a equipe:');
   if (!newPass || newPass.length < 3) return;
   loading(true);
@@ -1305,7 +2082,9 @@ function editTeam(id) {
     if (!user) { toast('Equipe não encontrada', 'error'); return; }
     $('editTeamId').value = id;
     $('editTeamName').value = user.username || '';
-    $('editTeamSupervisor').value = user.supervisor || '';
+    var supSel = $('editTeamSupervisor');
+    if (!supSel.options.length) populateSupervisorSelect('editTeamSupervisor', '');
+    supSel.value = user.supervisor_id || '';
     $('editTeamGoal').value = user.goal_money > 0 ? user.goal_money : '';
     $('editTeamShiftStart').value = user.shift_start || '';
     $('editTeamShiftEnd').value = user.shift_end || '';
@@ -1320,9 +2099,10 @@ function editTeam(id) {
 }
 
 function saveEditTeam() {
+  if (!ensureAdmin()) return;
   var id = $('editTeamId').value;
   var name = $('editTeamName').value.trim();
-  var supervisor = $('editTeamSupervisor').value.trim();
+  var supId = $('editTeamSupervisor').value;
   var goalRaw = $('editTeamGoal').value;
   var goalMoney = parseFloat(goalRaw) || 0;
   var shiftStart = $('editTeamShiftStart').value;
@@ -1337,21 +2117,44 @@ function saveEditTeam() {
   if (!name) { showMsg('editTeamMsg', 'error', 'O nome da equipe é obrigatório'); return; }
   clearMsg('editTeamMsg');
 
-  var updateData = {
-    username: name,
-    supervisor: supervisor || '',
-    goal_money: goalMoney,
-    shift_start: shiftStart || '',
-    shift_end: shiftEnd || '',
-    days_of_week: editDays
-  };
-
-  if (newPass && newPass.length >= 3) {
-    updateData.password = newPass;
-  }
-
   loading(true);
-  fbUpdate('users/' + id, updateData).then(function() {
+  fbOnce('users/' + id).then(function(team) {
+    var oldSupId = team && team.supervisor_id;
+    var supUser = null;
+    var ops = [];
+    if (supId) {
+      return fbOnce('users/' + supId).then(function(sup) {
+        supUser = sup;
+        var updateData = {
+          username: name,
+          supervisor_id: supUser ? supId : '',
+          supervisor: supUser ? supUser.username || '' : '',
+          goal_money: goalMoney,
+          shift_start: shiftStart || '',
+          shift_end: shiftEnd || '',
+          days_of_week: editDays
+        };
+        if (newPass && newPass.length >= 3) updateData.password = newPass;
+        ops.push(fbUpdate('users/' + id, updateData));
+        if (supUser && supUser.role === 'supervisor') ops.push(linkTeamToSupervisor(supId, id, true));
+        if (oldSupId && oldSupId !== supId) ops.push(linkTeamToSupervisor(oldSupId, id, false));
+        return Promise.all(ops);
+      });
+    }
+    var updateData = {
+      username: name,
+      supervisor_id: '',
+      supervisor: '',
+      goal_money: goalMoney,
+      shift_start: shiftStart || '',
+      shift_end: shiftEnd || '',
+      days_of_week: editDays
+    };
+    if (newPass && newPass.length >= 3) updateData.password = newPass;
+    ops.push(fbUpdate('users/' + id, updateData));
+    if (oldSupId) ops.push(linkTeamToSupervisor(oldSupId, id, false));
+    return Promise.all(ops);
+  }).then(function() {
     loading(false);
     toast('Equipe atualizada com sucesso!', 'success');
     closeEditTeamModal();
@@ -1368,7 +2171,7 @@ function closeEditTeamModal() {
 
 // --- Catálogo de Serviços ---
 function loadCatalogList() {
-  fbOnce('catalog_services').then(function(services) {
+  fbCached('catalog_services', 60000).then(function(services) {
     renderCatalogList(toArray(services));
   });
 }
@@ -1419,6 +2222,7 @@ function toggleEditCatalog(id) {
 }
 
 function createCatalogService() {
+  if (!ensureAdmin()) return;
   var name = $('catalogName').value.trim();
   var ups = parseFloat($('catalogUps').value);
   var money = parseFloat($('catalogMoney').value);
@@ -1442,6 +2246,7 @@ function createCatalogService() {
 }
 
 function saveCatalogEdit(id) {
+  if (!ensureAdmin()) return;
   var editId = 'catalogEdit_' + id;
   var name = $(editId + '_name').value.trim();
   var ups = parseFloat($(editId + '_ups').value);
@@ -1462,6 +2267,7 @@ function saveCatalogEdit(id) {
 }
 
 function deleteCatalogService(id) {
+  if (!ensureAdmin()) return;
   if (!confirm('Excluir este serviço do catálogo?')) return;
   loading(true);
   fbRemove('catalog_services/' + id).then(function() {
@@ -1475,109 +2281,19 @@ function deleteCatalogService(id) {
 }
 
 function exportData() {
-  var start = $('adminStartDate').value;
-  var end = $('adminEndDate').value;
+  var start = clampDateToAllowed($('adminStartDate').value);
+  var end = clampDateToAllowed($('adminEndDate').value);
+  $('adminStartDate').value = start;
+  $('adminEndDate').value = end;
   if (!start || !end) { toast('Selecione o período', 'error'); return; }
   loading(true);
-  Promise.all([fbOnce('services'), fbOnce('users'), fbOnce('shift_notes')]).then(function(results) {
-    var allServices = toArray(results[0]);
-    var users = toArray(results[1]);
-    var teams = users.filter(function(u) { return u.role !== 'admin'; });
-    var teamMap = {};
-    teams.forEach(function(u) { teamMap[u.id] = u; });
-    var allNotes = toArray(results[2]);
-    var notesMap = {};
-    allNotes.forEach(function(n) { notesMap[n.team_id + '_' + n.date] = n; });
-    var servicesByTeamDate = {};
-    allServices.forEach(function(s) {
-      if (s.date >= start && s.date <= end) {
-        var key = s.user_id + '_' + s.date;
-        if (!servicesByTeamDate[key]) servicesByTeamDate[key] = [];
-        servicesByTeamDate[key].push(s);
-      }
-    });
-    var filtered = [];
-    var dayNames = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
-    var currentDate = new Date(start + 'T00:00:00');
-    var endDateObj = new Date(end + 'T00:00:00');
-    while (currentDate <= endDateObj) {
-      var dateStr = currentDate.getFullYear() + '-' + String(currentDate.getMonth() + 1).padStart(2, '0') + '-' + String(currentDate.getDate()).padStart(2, '0');
-      var dayOfWeek = currentDate.getDay();
-      for (var i = 0; i < teams.length; i++) {
-        var t = teams[i];
-        var key = t.id + '_' + dateStr;
-        var dayServices = servicesByTeamDate[key] || [];
-        var isScheduled = t.days_of_week && t.days_of_week.indexOf(dayOfWeek) !== -1;
-        var classification = '';
-        if (dayServices.length > 0 && isScheduled) {
-          classification = 'Abriu';
-        } else if (dayServices.length === 0 && isScheduled) {
-          classification = 'Não abriu';
-        } else if (dayServices.length > 0 && !isScheduled) {
-          classification = 'Extra';
-        } else {
-          continue;
-        }
-        var noteKey = t.id + '_' + dateStr;
-        var note = notesMap[noteKey];
-        var motivo = (note && note.reason) ? note.reason : '';
-        if (dayServices.length > 0) {
-          for (var j = 0; j < dayServices.length; j++) {
-            var s = dayServices[j];
-            filtered.push({
-              equipe: t.username || 'Desconhecido',
-              servico: s.service_name,
-              ups: s.ups_value,
-              quantidade: s.quantity,
-              valor_total: s.total_money,
-              nota: s.grade,
-              data: s.date,
-              meta_diaria: t.goal_money || 0,
-              classificacao: classification,
-              motivo: motivo,
-              latitude: s.latitude,
-              longitude: s.longitude,
-              endereco_equipe: t.address || ''
-            });
-          }
-        } else {
-          filtered.push({
-            equipe: t.username || 'Desconhecido',
-            servico: '',
-            ups: 0,
-            quantidade: 0,
-            valor_total: 0,
-            nota: '',
-            data: dateStr,
-            meta_diaria: t.goal_money || 0,
-            classificacao: classification,
-            motivo: motivo,
-            latitude: '',
-            longitude: '',
-            endereco_equipe: t.address || ''
-          });
-        }
-      }
-      currentDate.setDate(currentDate.getDate() + 1);
-    }
+  fbCached('users', CACHE_TTL).then(function(users) {
+    var teams = toArray(users).filter(function(u) { return u.role !== 'admin' && canViewTeam(u.id); });
+    return buildCsvReport(teams, start, end);
+  }).then(function(filtered) {
     loading(false);
     if (!filtered || filtered.length === 0) { toast('Nenhum dado para exportar no período', 'info'); return; }
-    var csv = '\uFEFF';
-    var headers = Object.keys(filtered[0]);
-    csv += headers.join(';') + '\n';
-    for (var i = 0; i < filtered.length; i++) {
-      var row = headers.map(function(h) { return '"' + String(filtered[i][h]).replace(/"/g, '""') + '"'; });
-      csv += row.join(';') + '\n';
-    }
-    var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    var link = document.createElement('a');
-    link.setAttribute('href', URL.createObjectURL(blob));
-    link.setAttribute('download', 'exportacao_ups_' + start + '_to_' + end + '.csv');
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    toast('Exportação concluída!', 'success');
+    downloadCsv(filtered, 'exportacao_ups_' + start + '_to_' + end + '.csv');
   }).catch(function(err) {
     loading(false);
     toast('Erro ao exportar: ' + err.message, 'error');
@@ -1585,33 +2301,41 @@ function exportData() {
 }
 
 // --- Apontamento de Turno ---
+function defaultPeriodForInputs(startId, endId) {
+  var range = getAllowedDateRange();
+  if (range) {
+    $(startId).value = range.end;
+    $(endId).value = range.end;
+    return;
+  }
+  var now = new Date();
+  $(startId).value = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-01';
+  $(endId).value = formatDate(new Date(now.getFullYear(), now.getMonth() + 1, 0));
+}
+
 function initApontamento() {
   if (!$('apontamentoStartDate').value) {
-    setApontamentoCurrentMonth();
+    defaultPeriodForInputs('apontamentoStartDate', 'apontamentoEndDate');
   }
 }
 
 function setApontamentoCurrentMonth() {
-  var today = new Date();
-  var first = new Date(today.getFullYear(), today.getMonth(), 1);
-  var last = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-  $('apontamentoStartDate').value = todayStr().slice(0, 8) + '01';
-  var lastDay = last.getDate();
-  var lastMonth = String(last.getMonth() + 1).padStart(2, '0');
-  $('apontamentoEndDate').value = today.getFullYear() + '-' + lastMonth + '-' + String(lastDay).padStart(2, '0');
+  defaultPeriodForInputs('apontamentoStartDate', 'apontamentoEndDate');
   loadApontamentos();
 }
 
 function loadApontamentos() {
-  var start = $('apontamentoStartDate').value;
-  var end = $('apontamentoEndDate').value;
+  var start = clampDateToAllowed($('apontamentoStartDate').value);
+  var end = clampDateToAllowed($('apontamentoEndDate').value);
+  $('apontamentoStartDate').value = start;
+  $('apontamentoEndDate').value = end;
   if (!start || !end) { toast('Selecione o período', 'error'); return; }
   loading(true);
   Promise.all([fbOnce('services'), fbOnce('users'), fbOnce('shift_notes')]).then(function(results) {
     var allServices = toArray(results[0]);
     var users = toArray(results[1]);
-    var teams = users.filter(function(u) { return u.role !== 'admin'; });
-    var existingNotes = toArray(results[3]);
+    var teams = users.filter(function(u) { return u.role !== 'admin' && canViewTeam(u.id); });
+    var existingNotes = toArray(results[2]);
     var notesMap = {};
     existingNotes.forEach(function(n) { notesMap[n.team_id + '_' + n.date] = n; });
     var servicesByTeamDate = {};
@@ -1662,7 +2386,7 @@ function renderApontamentos(items) {
     container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">check_circle</span><p>Nenhuma equipe faltou no período selecionado</p></div>';
     return;
   }
-  var html = '<div class="table-wrap"><table><thead><tr><th>Equipe</th><th>Data</th><th>Dia</th><th>Motivo</th><th>Ação</th></tr></thead><tbody>';
+  var html = '<div class="table-wrap"><table><thead><tr><th>Equipe</th><th>Data</th><th>Dia</th><th>Motivo</th>' + (isSupervisor() ? '' : '<th>Ação</th>') + '</tr></thead><tbody>';
   for (var i = 0; i < items.length; i++) {
     var it = items[i];
     var inputId = 'apontamento_' + it.team_id + '_' + it.date.replace(/-/g, '');
@@ -1670,8 +2394,10 @@ function renderApontamentos(items) {
       '<td><strong>' + escapeHtml(it.team_name) + '</strong></td>' +
       '<td>' + formatDateBr(it.date) + '</td>' +
       '<td>' + it.day_name + '</td>' +
-      '<td><input type="text" id="' + inputId + '" placeholder="Motivo da ausência..." value="' + escapeHtml(it.reason) + '" style="min-width:200px;"></td>' +
-      '<td><button class="btn btn-sm btn-primary" onclick="saveApontamento(\'' + it.team_id + '\',\'' + it.date + '\',\'' + inputId + '\')"><span class="material-symbols-outlined">save</span> Salvar</button></td>' +
+      '<td>' + (isSupervisor()
+        ? escapeHtml(it.reason || '<span style="color:var(--text-muted);">—</span>')
+        : '<input type="text" id="' + inputId + '" placeholder="Motivo da ausência..." value="' + escapeHtml(it.reason) + '" style="min-width:200px;">') + '</td>' +
+      (isSupervisor() ? '' : '<td><button class="btn btn-sm btn-primary" onclick="saveApontamento(\'' + it.team_id + '\',\'' + it.date + '\',\'' + inputId + '\')"><span class="material-symbols-outlined">save</span> Salvar</button></td>') +
       '</tr>';
   }
   html += '</tbody></table></div>';
@@ -1679,6 +2405,7 @@ function renderApontamentos(items) {
 }
 
 function saveApontamento(teamId, date, inputId) {
+  if (!ensureAdmin()) return;
   var reason = $(inputId).value.trim();
   if (!reason) { toast('Informe o motivo', 'error'); return; }
   loading(true);
@@ -1712,6 +2439,7 @@ function saveApontamento(teamId, date, inputId) {
 
 // --- Regras ---
 function addRule() {
+  if (!ensureAdmin()) return;
   var container = $('rulesContainer');
   var id = 'new_' + Date.now();
   var html = '<div class="rule-card" data-rule-id="' + id + '">' +
@@ -1762,6 +2490,7 @@ function renderRules(rules) {
 }
 
 function saveRules() {
+  if (!ensureAdmin()) return;
   var cards = document.querySelectorAll('.rule-card');
   var rules = [];
   for (var i = 0; i < cards.length; i++) {
@@ -2101,28 +2830,24 @@ function toggleSupervisor(supId) {
 var auditoriaUsersCache = [];
 
 function initAuditoria() {
-  var now = new Date();
-  var firstDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-01';
-  var lastDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()).padStart(2, '0');
-  if (!$('auditoriaStartDate').value) $('auditoriaStartDate').value = firstDay;
-  if (!$('auditoriaEndDate').value) $('auditoriaEndDate').value = lastDay;
+  if (!$('auditoriaStartDate').value) {
+    defaultPeriodForInputs('auditoriaStartDate', 'auditoriaEndDate');
+  }
   fbOnce('users').then(function(users) {
-    auditoriaUsersCache = toArray(users).filter(function(u) { return u.role !== 'admin'; });
+    auditoriaUsersCache = toArray(users).filter(function(u) { return u.role !== 'admin' && canViewTeam(u.id); });
   });
 }
 
 function setAuditoriaCurrentMonth() {
-  var now = new Date();
-  var firstDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-01';
-  var lastDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()).padStart(2, '0');
-  $('auditoriaStartDate').value = firstDay;
-  $('auditoriaEndDate').value = lastDay;
+  defaultPeriodForInputs('auditoriaStartDate', 'auditoriaEndDate');
   loadAuditoria();
 }
 
 function loadAuditoria() {
-  var start = $('auditoriaStartDate').value;
-  var end = $('auditoriaEndDate').value;
+  var start = clampDateToAllowed($('auditoriaStartDate').value);
+  var end = clampDateToAllowed($('auditoriaEndDate').value);
+  $('auditoriaStartDate').value = start;
+  $('auditoriaEndDate').value = end;
   if (!start || !end) {
     showMsg('auditoriaMsg', 'error', 'Selecione o período');
     return;
@@ -2138,11 +2863,11 @@ function loadAuditoria() {
     var allServices = toArray(results[0]);
     var users = toArray(results[1]);
     var catalog = toArray(results[2]);
-    auditoriaUsersCache = users.filter(function(u) { return u.role !== 'admin'; });
+    auditoriaUsersCache = users.filter(function(u) { return u.role !== 'admin' && canViewTeam(u.id); });
     var userMap = {};
     users.forEach(function(u) { userMap[u.id] = u.username; });
     var filtered = allServices.filter(function(s) {
-      return s.date >= start && s.date <= end;
+      return s.date >= start && s.date <= end && canViewTeam(s.user_id);
     });
     filtered.sort(function(a, b) {
       if (a.date === b.date) return (a.created_at || 0) - (b.created_at || 0);
@@ -2169,7 +2894,7 @@ function renderAuditoria(services, userMap, catalog) {
     '<div class="stat-box"><span class="stat-box-icon money"><span class="material-symbols-outlined">payments</span></span><div><div class="stat-box-value">' + fmtMoney(totalMoney) + '</div><div class="stat-box-label">Total R$</div></div></div>' +
     '</div>';
   html += '<div class="table-wrap"><table><thead><tr>' +
-    '<th>Data</th><th>Equipe</th><th>Serviço</th><th>Tipo</th><th class="num">Qtd</th><th class="num">UPS</th><th class="num">R$</th><th class="num">Nota</th><th>Ações</th>' +
+    '<th>Data</th><th>Equipe</th><th>Serviço</th><th>Tipo</th><th class="num">Qtd</th><th class="num">UPS</th><th class="num">R$</th><th class="num">Nota</th>' + (isSupervisor() ? '' : '<th>Ações</th>') +
     '</tr></thead><tbody>';
   for (var i = 0; i < services.length; i++) {
     var s = services[i];
@@ -2185,16 +2910,18 @@ function renderAuditoria(services, userMap, catalog) {
       '<td class="num" style="font-weight:700;color:var(--primary);">' + fmtUps(s.ups_value || 0) + '</td>' +
       '<td class="num" style="font-weight:600;color:var(--money);">' + fmtMoney(s.total_money || 0) + '</td>' +
       '<td class="num">' + (s.grade > 0 ? s.grade : '-') + '</td>' +
-      '<td class="actions">' +
+      (isSupervisor() ? '' : '<td class="actions">' +
       '<button class="btn btn-sm btn-outline" onclick="editAuditoriaService(\'' + s.id + '\')"><span class="material-symbols-outlined">edit</span></button>' +
       '<button class="btn btn-sm btn-danger" onclick="deleteAuditoriaService(\'' + s.id + '\')"><span class="material-symbols-outlined">delete</span></button>' +
-      '</td></tr>';
+      '</td>') +
+      '</tr>';
   }
   html += '</tbody></table></div>';
   container.innerHTML = html;
 }
 
 function editAuditoriaService(serviceId) {
+  if (!ensureAdmin()) return;
   loading(true);
   Promise.all([fbOnce('services/' + serviceId), fbOnce('users')]).then(function(results) {
     loading(false);
@@ -2247,6 +2974,7 @@ function editAuditoriaService(serviceId) {
 }
 
 function saveEditService() {
+  if (!ensureAdmin()) return;
   var id = $('editServiceId').value;
   var userId = $('editServiceUserId').value;
   var type = $('editServiceType').value;
@@ -2297,6 +3025,7 @@ function saveEditService() {
 }
 
 function deleteAuditoriaService(serviceId) {
+  if (!ensureAdmin()) return;
   if (!confirm('Excluir este lançamento? Esta ação não pode ser desfeita.')) return;
   loading(true);
   fbRemove('services/' + serviceId).then(function() {
@@ -2320,25 +3049,21 @@ function toggleKanbanCard(id) {
 }
 
 function initClassificacao() {
-  var now = new Date();
-  var firstDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-01';
-  var lastDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()).padStart(2, '0');
-  if (!$('classificacaoStartDate').value) $('classificacaoStartDate').value = firstDay;
-  if (!$('classificacaoEndDate').value) $('classificacaoEndDate').value = lastDay;
+  if (!$('classificacaoStartDate').value) {
+    defaultPeriodForInputs('classificacaoStartDate', 'classificacaoEndDate');
+  }
 }
 
 function setClassificacaoCurrentMonth() {
-  var now = new Date();
-  var firstDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-01';
-  var lastDay = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()).padStart(2, '0');
-  $('classificacaoStartDate').value = firstDay;
-  $('classificacaoEndDate').value = lastDay;
+  defaultPeriodForInputs('classificacaoStartDate', 'classificacaoEndDate');
   loadClassificacao();
 }
 
 function loadClassificacao() {
-  var start = $('classificacaoStartDate').value;
-  var end = $('classificacaoEndDate').value;
+  var start = clampDateToAllowed($('classificacaoStartDate').value);
+  var end = clampDateToAllowed($('classificacaoEndDate').value);
+  $('classificacaoStartDate').value = start;
+  $('classificacaoEndDate').value = end;
   if (!start || !end) {
     showMsg('classificacaoMsg', 'error', 'Selecione o período');
     return;
@@ -2351,7 +3076,7 @@ function loadClassificacao() {
   loading(true);
   Promise.all([fbOnce('users'), fbOnce('services'), fbOnce('rules')]).then(function(results) {
     loading(false);
-    var users = toArray(results[0]).filter(function(u) { return u.role !== 'admin'; });
+    var users = toArray(results[0]).filter(function(u) { return u.role !== 'admin' && canViewTeam(u.id); });
     var allServices = toArray(results[1]);
     rulesCache = toArray(results[2]).map(function(r) {
       return { id: r.id, class: r.class, minUps: r.min_ups, maxUps: r.max_ups, color: r.color };
@@ -2569,8 +3294,10 @@ function onVisibilityChange() {
 
 function refreshAfterSync() {
   if (!currentUser) return;
-  if (currentUser.role === 'admin') {
-    loadAllAdminData();
+  if (currentUser.role === 'admin' || currentUser.role === 'supervisor') {
+    initAdminView();
+  } else if (currentUser.role === 'user') {
+    initMonitorView(false);
   } else {
     refreshTeamView();
     loadTeamCatalog();
@@ -2731,6 +3458,7 @@ document.addEventListener('DOMContentLoaded', function() {
   OfflineDB.setBaseUrl(DB_BASE_URL);
   OfflineDB.setStatusCallback(updateSyncStatus);
   OfflineDB.init().then(function() {
+    OfflineDB.prune();
     OfflineDB.sync();
     updateSyncStatus();
   });

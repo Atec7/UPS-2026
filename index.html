@@ -631,6 +631,7 @@
   <div class="nav-tabs" id="adminTabs">
     <button class="nav-tab active" data-tab="tabPainel"><span class="material-symbols-outlined">dashboard</span> Painel</button>
     <button class="nav-tab" data-tab="tabEquipes"><span class="material-symbols-outlined">groups</span> Equipes</button>
+    <button class="nav-tab" data-tab="tabUsuarios"><span class="material-symbols-outlined">manage_accounts</span> Usuários</button>
     <button class="nav-tab" data-tab="tabServicos"><span class="material-symbols-outlined">build</span> Serviços</button>
     <button class="nav-tab" data-tab="tabRegras"><span class="material-symbols-outlined">tune</span> Regras</button>
     <button class="nav-tab" data-tab="tabSupervisores"><span class="material-symbols-outlined">supervisor_account</span> Supervisores</button>
@@ -647,7 +648,7 @@
     </div>
   </div>
   <div class="tab-content" id="tabEquipes">
-    <div class="card">
+    <div class="card" id="newTeamCard">
       <div class="card-title"><span class="material-symbols-outlined">person_add</span> Nova Equipe</div>
       <div id="teamFormMsgAdmin" class="msg"></div>
       <div class="form-row">
@@ -655,7 +656,11 @@
         <div class="form-group"><label>Senha</label><input type="text" id="newTeamPass" placeholder="Senha de acesso"></div>
       </div>
       <div class="form-row">
-        <div class="form-group"><label>Supervisor</label><input type="text" id="newTeamSupervisor" placeholder="Nome do supervisor"></div>
+        <div class="form-group"><label>Supervisor (conta)</label>
+          <select id="newTeamSupervisor">
+            <option value="">— Sem supervisor —</option>
+          </select>
+        </div>
         <div class="form-group"><label>Meta Financeira (R$)</label><input type="number" id="newTeamGoal" placeholder="0,00" min="0" step="0.01"></div>
       </div>
       <div class="form-row">
@@ -675,7 +680,7 @@
         </div>
       </div>
       <div class="form-group">
-        <label>Localização (automática)</label>
+        <label>Localização</label>
         <div style="display:flex;gap:8px;align-items:stretch;">
           <div id="newTeamLocation" style="flex:1;font-size:12px;color:var(--text-secondary);padding:8px 12px;border:1.5px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);display:flex;align-items:center;gap:8px;min-height:42px;">
             <span class="material-symbols-outlined" id="locationIcon" style="font-size:18px;color:var(--text-muted);">my_location</span>
@@ -693,8 +698,48 @@
       <div id="teamsList"><div class="empty-state"><span class="material-symbols-outlined">hourglass_empty</span><p>Carregando...</p></div></div>
     </div>
   </div>
-  <div class="tab-content" id="tabServicos">
+  <div class="tab-content" id="tabUsuarios">
+    <div class="card" id="newUserCard">
+      <div class="card-title"><span class="material-symbols-outlined">person_add</span> Novo Usuário / Supervisor</div>
+      <p class="card-subtitle">Crie contas de supervisor (visão do painel restrita às próprias equipes e aos últimos 3 dias) ou de usuário com visualização livre. Vincule as equipes que a conta poderá consultar.</p>
+      <div id="userFormMsg" class="msg"></div>
+      <div class="form-row">
+        <div class="form-group"><label>Nome de usuário</label><input type="text" id="newUserName" placeholder="Ex: carlos.silva" autocomplete="off"></div>
+        <div class="form-group"><label>Senha</label><input type="text" id="newUserPass" placeholder="Senha de acesso" autocomplete="off"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Perfil</label>
+          <select id="newUserRole">
+            <option value="supervisor">Supervisor — painel restrito às suas equipes (últimos 3 dias)</option>
+            <option value="user">Usuário — visualização com período livre</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Equipes vinculadas (visualização)</label>
+          <div id="newUserTeams" class="activities-selection" style="max-height:140px;">
+            <div class="empty-state" style="padding:8px;">Carregando equipes...</div>
+          </div>
+        </div>
+      </div>
+      <button class="btn btn-primary btn-block" onclick="createUser()"><span class="material-symbols-outlined">add</span> Cadastrar Usuário</button>
+    </div>
     <div class="card">
+      <div class="card-title"><span class="material-symbols-outlined">manage_accounts</span> Usuários e Supervisores</div>
+      <div id="usersList"><div class="empty-state"><span class="material-symbols-outlined">hourglass_empty</span><p>Carregando...</p></div></div>
+    </div>
+    <div class="card" id="maintenanceCard">
+      <div class="card-title"><span class="material-symbols-outlined">cleaning_services</span> Manutenção de Dados (economia de armazenamento)</div>
+      <p class="card-subtitle">Remova localizações antigas que nunca são lidas e aplique a retenção local de serviços e cache.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-outline btn-sm" onclick="cleanupLocationHistory()"><span class="material-symbols-outlined">delete_sweep</span> Limpar localização antiga (&gt;30 dias)</button>
+        <button class="btn btn-outline btn-sm" onclick="cleanupLocalRetention()"><span class="material-symbols-outlined">storage</span> Aplicar retenção local</button>
+        <button class="btn btn-outline btn-sm" onclick="refreshCachedData()"><span class="material-symbols-outlined">refresh</span> Refrescar cache imediato</button>
+      </div>
+    </div>
+  </div>
+  <div class="tab-content" id="tabServicos">
+    <div class="card" id="newCatalogCard">
       <div class="card-title"><span class="material-symbols-outlined">note_add</span> Novo Serviço</div>
       <div id="catalogFormMsg" class="msg"></div>
       <div class="form-row">
@@ -714,11 +759,11 @@
       <div class="card-title"><span class="material-symbols-outlined">tune</span> Regras de Classificação</div>
       <p class="card-subtitle">Defina os intervalos de UPS para cada classe. Salve após alterar.</p>
       <div id="rulesFormMsg" class="msg"></div>
-      <div style="display:flex;justify-content:flex-end;margin-bottom:12px;">
+      <div style="display:flex;justify-content:flex-end;margin-bottom:12px;" id="rulesAddActions">
         <button class="btn btn-outline btn-sm" onclick="addRule()"><span class="material-symbols-outlined">add</span> Adicionar Regra</button>
       </div>
       <div id="rulesContainer"></div>
-      <button class="btn btn-primary btn-block" onclick="saveRules()"><span class="material-symbols-outlined">save</span> Salvar Regras</button>
+      <button class="btn btn-primary btn-block" id="rulesSaveBtn" onclick="saveRules()"><span class="material-symbols-outlined">save</span> Salvar Regras</button>
     </div>
   </div>
   <div class="tab-content" id="tabSupervisores">
@@ -814,6 +859,35 @@
       <div id="apontamentoMsg" class="msg"></div>
       <div id="apontamentoContent"><div class="empty-state"><span class="material-symbols-outlined">assignment_late</span><p>Selecione um período e clique em Consultar</p></div></div>
     </div>
+  </div>
+</div>
+
+<!-- ========== MONITOR / SUPERVISOR VIEW ========== -->
+<div id="monitorView" class="view">
+  <div class="topbar">
+    <div class="topbar-left">
+      <div class="topbar-avatar"><span class="material-symbols-outlined">supervisor_account</span></div>
+      <h2 id="monUserName">Monitor</h2>
+      <span class="topbar-info"><span class="material-symbols-outlined">calendar_today</span><span id="monPeriod"></span></span>
+    </div>
+    <div class="topbar-right">
+      <div id="monFilters" class="topbar-filters" style="display:none;align-items:center;gap:8px;margin-right:12px;">
+        <input type="date" id="monStartDate" style="width:130px;padding:4px 8px;font-size:12px;" onchange="loadMonitorView()">
+        <span style="color:var(--text-muted);font-size:12px;">até</span>
+        <input type="date" id="monEndDate" style="width:130px;padding:4px 8px;font-size:12px;" onchange="loadMonitorView()">
+      </div>
+      <button class="btn btn-money btn-sm" onclick="exportMonitorData()"><span class="material-symbols-outlined">download</span> Exportar</button>
+      <button class="btn btn-ghost btn-sm" onclick="logout()"><span class="material-symbols-outlined">logout</span></button>
+    </div>
+  </div>
+  <div id="monLockBanner" class="msg warning" style="display:none;margin-bottom:12px;align-items:center;gap:8px;">
+    <span class="material-symbols-outlined">lock</span>
+    <span>Visão restrita ao <strong>mês vigente</strong>. O acesso a períodos anteriores está bloqueado para supervisores.</span>
+  </div>
+  <div id="monSummaries"></div>
+  <div class="card" style="margin-top:12px;">
+    <div class="card-title"><span class="material-symbols-outlined">leaderboard</span> Desempenho das Equipes</div>
+    <div id="monTeamsContent"><div class="empty-state"><span class="material-symbols-outlined">hourglass_empty</span><p>Carregando...</p></div></div>
   </div>
 </div>
 
@@ -937,6 +1011,44 @@
   </div>
 </div>
 
+<!-- ========== MODAL EDITAR USUÁRIO/SUPERVISOR ========== -->
+<div id="editUserModal" class="modal-overlay" style="display:none;">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2><span class="material-symbols-outlined" style="font-size:20px;">manage_accounts</span> Editar Usuário</h2>
+      <button class="modal-close-btn" onclick="closeEditUserModal()"><span class="material-symbols-outlined">close</span></button>
+    </div>
+    <div class="modal-body">
+      <div id="editUserMsg" class="msg"></div>
+      <input type="hidden" id="editUserId">
+      <div class="form-row">
+        <div class="form-group">
+          <label>Nome de usuário</label>
+          <input type="text" id="editUserName">
+        </div>
+        <div class="form-group">
+          <label>Perfil</label>
+          <select id="editUserRole">
+            <option value="supervisor">Supervisor — painel restrito às suas equipes (últimos 3 dias)</option>
+            <option value="user">Usuário — período livre</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Nova senha (deixe em branco para manter)</label>
+        <input type="text" id="editUserPass" placeholder="Deixe vazio para manter a senha">
+      </div>
+      <div class="form-group">
+        <label>Equipes vinculadas (visualização)</label>
+        <div id="editUserTeams" class="activities-selection" style="max-height:150px;"></div>
+      </div>
+      <button class="btn btn-success btn-block" onclick="saveEditUser()">
+        <span class="material-symbols-outlined">save</span> Salvar Alterações
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- ========== MODAL EDITAR EQUIPE ========== -->
 <div id="editTeamModal" class="modal-overlay" style="display:none;">
   <div class="modal-content">
@@ -952,8 +1064,10 @@
         <input type="text" id="editTeamName" placeholder="Nome da equipe">
       </div>
       <div class="form-group">
-        <label>Supervisor</label>
-        <input type="text" id="editTeamSupervisor" placeholder="Nome do supervisor">
+        <label>Supervisor (conta)</label>
+        <select id="editTeamSupervisor">
+          <option value="">— Sem supervisor —</option>
+        </select>
       </div>
       <div class="form-group">
         <label>Meta Financeira (R$)</label>

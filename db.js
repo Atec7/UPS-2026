@@ -262,6 +262,80 @@
     });
   }
 
+  // Converte node do Firebase ({ chave: valor }) em array com .id
+  function toRecords(obj) {
+    if (!obj) return [];
+    return Object.keys(obj).map(function(k) {
+      var item = obj[k];
+      if (typeof item === 'object' && item !== null) {
+        item = extend({}, item);
+        item.id = k;
+      } else {
+        item = { id: k, value: item };
+      }
+      return item;
+    });
+  }
+
+  // Filtra em memória (fallback offline das consultas com query)
+  function applyQueryFilter(records, params) {
+    var out = records || [];
+    if (params && params.orderBy && params.equalTo !== undefined && params.equalTo !== null) {
+      var eq = params.equalTo;
+      out = out.filter(function(r) { return r[params.orderBy] === eq; });
+    }
+    if (params && params.startAt !== undefined && params.startAt !== null) {
+      var sa = params.startAt;
+      out = out.filter(function(r) { return (r[params.orderBy] != null && r[params.orderBy] >= sa); });
+    }
+    if (params && params.endAt !== undefined && params.endAt !== null) {
+      var ea = params.endAt;
+      out = out.filter(function(r) { return (r[params.orderBy] != null && r[params.orderBy] <= ea); });
+    }
+    if (params && params.limitToLast) {
+      out = out.slice(-Number(params.limitToLast));
+    }
+    return out;
+  }
+
+  // Monta a URL com filtros do Firebase RTDB (orderBy / equalTo / limitToLast)
+  function buildQueryUrl(path, params) {
+    var url = fbUrl(path);
+    var qs = [];
+    if (params && params.orderBy) {
+      qs.push('orderBy=' + encodeURIComponent('"' + params.orderBy + '"'));
+    }
+    if (params && params.equalTo !== undefined && params.equalTo !== null) {
+      var ev = params.equalTo;
+      qs.push('equalTo=' + encodeURIComponent(typeof ev === 'number' || typeof ev === 'boolean' ? String(ev) : '"' + ev + '"'));
+    }
+    if (params && params.startAt !== undefined && params.startAt !== null) {
+      var sv = params.startAt;
+      qs.push('startAt=' + encodeURIComponent(typeof sv === 'number' ? String(sv) : '"' + sv + '"'));
+    }
+    if (params && params.endAt !== undefined && params.endAt !== null) {
+      var eav = params.endAt;
+      qs.push('endAt=' + encodeURIComponent(typeof eav === 'number' ? String(eav) : '"' + eav + '"'));
+    }
+    if (params && params.limitToLast) {
+      qs.push('limitToLast=' + Number(params.limitToLast));
+    }
+    return url + (qs.length ? '?' + qs.join('&') : '');
+  }
+
+  // Mescla o resultado de uma consulta no espelho local SEM apagar registros
+  // não relacionados (diferente do mirrorCollection, que limpa a coleção).
+  function upsertFromQuery(store, netData) {
+    return putMany(store, toRecords(netData));
+  }
+
+  function dateNDaysAgo(days) {
+    var d = new Date(Date.now() - days * 86400000);
+    return d.getFullYear() + '-' +
+      String(d.getMonth() + 1).padStart(2, '0') + '-' +
+      String(d.getDate()).padStart(2, '0');
+  }
+
   function renameLocal(store, oldId, newId) {
     return getOne(store, oldId).then(function(rec) {
       if (!rec) return null;
@@ -404,6 +478,111 @@
             });
           }).catch(function() {
             return local;
+          });
+        });
+      });
+    },
+
+    // Consulta com filtros no servidor (economiza download): baixa APENAS os
+    // registros que interessam (ex.: services de uma equipe) e mescla no
+    // espelho local sem limpar a coleção.
+    query: function(path, params) {
+      if (!path) return Promise.resolve([]);
+      params = params || {};
+      if (!isOnline()) {
+        return localRead(path).then(function(local) {
+          return applyQueryFilter(toRecords(local), params);
+        });
+      }
+      var beforeRead = OfflineDB.requestSync();
+      return beforeRead.then(function() {
+        return fetch(buildQueryUrl(path, params)).then(function(r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        }).then(function(net) {
+          var p = parsePath(path);
+          if (p.store) return upsertFromQuery(p.store, net).then(function() { return toRecords(net); });
+          return toRecords(net);
+        }).catch(function() {
+          // offline/erro: usa o espelho local como fallback
+          return localRead(path).then(function(local) {
+            return applyQueryFilter(toRecords(local), params);
+          });
+        });
+      });
+    },
+
+    // Leitura "cache-first com TTL": serve o espelho local imediato e só
+    // consulta a rede quando o cache expirou. Reduz drasticamente o download
+    // em telas que atualizam a cada 30s (painéis, catálogo, regras, usuários).
+    readCached: function(path, maxAgeMs) {
+      maxAgeMs = maxAgeMs || 30000;
+      var cacheKey = 'cache_' + path;
+      return localRead(path).then(function(local) {
+        if (!isOnline()) return local;
+        var hasLocal = local != null && (typeof local !== 'object' || Object.keys(local).length > 0);
+        return getOne('meta', cacheKey).then(function(m) {
+          var fresh = m && m.value && (Date.now() - m.value) < maxAgeMs;
+          if (fresh && hasLocal) return local;
+          return netRead(path).then(function(net) {
+            return mirror(path, net).then(function() {
+              return putOne('meta', { id: cacheKey, value: Date.now() }).then(function() { return net; });
+            });
+          }).catch(function() {
+            return local;
+          });
+        });
+      });
+    },
+
+    // Limpeza de retenção do espelho local (economia de armazenamento).
+    // services: padrão 365 dias; location: padrão 30 dias.
+    prune: function(opts) {
+      opts = opts || {};
+      var svcDays = opts.servicesDays == null ? 365 : opts.servicesDays;
+      var locDays = opts.locationDays == null ? 30 : opts.locationDays;
+      var svcCutoff = dateNDaysAgo(svcDays);
+      var locCutoff = Date.now() - locDays * 86400000;
+      var svcPromise = getAll('services').then(function(recs) {
+        var toDel = (recs || []).filter(function(r) {
+          if (String(r.id).indexOf('offline_') === 0) return false;
+          return !r.date || r.date < svcCutoff;
+        });
+        return Promise.all(toDel.map(function(r) { return delOne('services', r.id); }));
+      });
+      var locPromise = getAll('location').then(function(recs) {
+        var toDel = (recs || []).filter(function(r) {
+          if (String(r.id).indexOf('offline_') === 0) return false;
+          return !r.timestamp || r.timestamp < locCutoff;
+        });
+        return Promise.all(toDel.map(function(r) { return delOne('location', r.id); }));
+      });
+      return Promise.all([svcPromise, locPromise]);
+    },
+
+    // Remove localizações antigas (remoto + local). O histórico de localização
+    // nunca é lido pelo app, então é seguro apagar após N dias.
+    pruneLocationHistory: function(days) {
+      days = days || 30;
+      var cutoff = Date.now() - days * 86400000;
+      return getAll('location').then(function(recs) {
+        var old = (recs || []).filter(function(r) {
+          return r.timestamp && r.timestamp < cutoff && String(r.id).indexOf('offline_') !== 0;
+        });
+        return Promise.all(old.map(function(r) { return delOne('location', r.id); })).then(function() {
+          if (!isOnline()) return { removed: old.length, path: '' };
+          var removedPath = '';
+          var chain = Promise.resolve();
+          old.forEach(function(r) {
+            chain = chain.then(function() {
+              var path = 'location_history/' + r.id;
+              removedPath = path;
+              return netRemove(path).catch(function() {});
+            });
+          });
+          return chain.then(function() {
+            notifyStatus();
+            return { removed: old.length, path: removedPath };
           });
         });
       });
