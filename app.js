@@ -3,7 +3,7 @@ var DB_BASE_URL = 'https://babearia-jhosuan-default-rtdb.firebaseio.com';
 
 // Versão atual do app. Ao publicar uma nova versão, atualize ESTE valor,
 // o VERSION em sw.js e o "version" em version.json (devem ser iguais).
-var APP_VERSION = '1.3.0';
+var APP_VERSION = '1.3.1';
 
 // ===== UTILITIES =====
 var currentUser = null;
@@ -345,6 +345,7 @@ function buildCsvReport(teams, start, end) {
             var s = dayServices[j];
             filtered.push({
               equipe: t.username || 'Desconhecido',
+              processo: t.process || '',
               servico: s.service_name,
               ups: s.ups_value,
               quantidade: s.quantity,
@@ -362,6 +363,7 @@ function buildCsvReport(teams, start, end) {
         } else {
           filtered.push({
             equipe: t.username || 'Desconhecido',
+            processo: t.process || '',
             servico: '',
             ups: 0,
             quantidade: 0,
@@ -1391,6 +1393,40 @@ function exportMonitorData() {
 }
 
 // ===== ADMIN: USUÁRIOS E SUPERVISORES =====
+// Processos aos quais uma equipe pode ser vinculada.
+var TEAM_PROCESSES = [
+  'Construção 5 - Linha Morta Emergencial',
+  'Construção 7 - Linha Morta',
+  'Corte e Religação Leve',
+  'Equipe Inspeção',
+  'Inspeção de Obra',
+  'Ligação Nova - Mini Sky',
+  'Ligação Nova Leve',
+  'Linha Viva 3 (04) e Linha Viva 4 (02)',
+  'Manutenção',
+  'Plantão - Mini Sky - 4x2',
+  'Plantão 3 - 4x4',
+  'Plantão 6 - 4x4',
+  'Poda',
+  'Poda Mid Sky',
+  'Recolhimentos (Podas)'
+];
+
+function populateProcessSelect(selectId, selected) {
+  var sel = $(selectId);
+  if (!sel) return;
+  var html = '<option value="">— Selecione o processo —</option>';
+  TEAM_PROCESSES.forEach(function(p) {
+    html += '<option value="' + escapeHtml(p) + '">' + escapeHtml(p) + '</option>';
+  });
+  // Preserva um processo legado que não esteja mais na lista
+  if (selected && TEAM_PROCESSES.indexOf(selected) === -1) {
+    html += '<option value="' + escapeHtml(selected) + '">' + escapeHtml(selected) + '</option>';
+  }
+  sel.innerHTML = html;
+  sel.value = selected || '';
+}
+
 function populateSupervisorSelect(selectId, selectedId) {
   var sel = $(selectId);
   if (!sel) return;
@@ -1435,6 +1471,7 @@ function populateAdminForms() {
   fbCached('users', CACHE_TTL).then(function(users) {
     userCache = toArray(users);
     populateSupervisorSelect('newTeamSupervisor', '');
+    populateProcessSelect('newTeamProcess', $('newTeamProcess') ? $('newTeamProcess').value : '');
     populateTeamChecklist('newUserTeams', null);
   }).catch(function() {});
 }
@@ -1896,7 +1933,7 @@ function renderTeamsList(users) {
     return;
   }
   var dayNames = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
-  var html = '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Nome</th><th>Supervisor</th><th>Meta R$</th><th>Status</th><th>Função</th><th>Turno</th><th>Dias</th><th>Localização</th>' + (isSup ? '' : '<th>Ações</th>') + '</tr></thead><tbody>';
+  var html = '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Nome</th><th>Processo</th><th>Supervisor</th><th>Meta R$</th><th>Status</th><th>Função</th><th>Turno</th><th>Dias</th><th>Localização</th>' + (isSup ? '' : '<th>Ações</th>') + '</tr></thead><tbody>';
   for (var i = 0; i < teams.length; i++) {
     var t = teams[i];
     var statusInfo = getStatusInfo(t.last_seen);
@@ -1910,6 +1947,7 @@ function renderTeamsList(users) {
     }
     var goalDisplay = t.goal_money > 0 ? fmtMoney(t.goal_money) : '<span style="color:var(--text-muted);">—</span>';
     var supDisplay = t.supervisor ? escapeHtml(t.supervisor) : '<span style="color:var(--text-muted);">—</span>';
+    var procDisplay = t.process ? '<span style="font-size:12px;">' + escapeHtml(t.process) + '</span>' : '<span style="color:var(--text-muted);">—</span>';
     var shiftDisplay = '<span style="color:var(--text-muted);">—</span>';
     var shiftStatus = '';
     var shiftSp = getShiftProgress(t);
@@ -1927,6 +1965,7 @@ function renderTeamsList(users) {
     html += '<tr>' +
       '<td style="font-weight:600;color:var(--text-muted);">#' + t.id.slice(-6) + '</td>' +
       '<td><strong>' + escapeHtml(t.username) + '</strong></td>' +
+      '<td>' + procDisplay + '</td>' +
       '<td>' + supDisplay + '</td>' +
       '<td style="color:var(--money);font-weight:600;">' + goalDisplay + '</td>' +
       '<td>' + statusHtml + '</td>' +
@@ -1969,6 +2008,7 @@ function createTeam() {
   var name = $('newTeamName').value.trim();
   var pass = $('newTeamPass').value.trim();
   var supId = $('newTeamSupervisor').value;
+  var process = $('newTeamProcess').value;
   var goalRaw = $('newTeamGoal').value;
   var goalMoney = parseFloat(goalRaw) || 0;
   var shiftStart = $('newTeamShiftStart').value;
@@ -1997,6 +2037,7 @@ function createTeam() {
       username: name, password: pass, role: 'equipe',
       supervisor_id: supUser ? supId : '',
       supervisor: supUser ? supUser.username : '',
+      process: process || '',
       goal_money: goalMoney,
       shift_start: shiftStart || '',
       shift_end: shiftEnd || '',
@@ -2019,6 +2060,7 @@ function createTeam() {
       $('newTeamName').value = '';
       $('newTeamPass').value = '';
       $('newTeamSupervisor').value = '';
+      $('newTeamProcess').value = '';
       $('newTeamGoal').value = '';
       $('newTeamShiftStart').value = '';
       $('newTeamShiftEnd').value = '';
@@ -2082,9 +2124,18 @@ function editTeam(id) {
     if (!user) { toast('Equipe não encontrada', 'error'); return; }
     $('editTeamId').value = id;
     $('editTeamName').value = user.username || '';
+    var supId = user.supervisor_id || '';
+    populateSupervisorSelect('editTeamSupervisor', supId);
     var supSel = $('editTeamSupervisor');
-    if (!supSel.options.length) populateSupervisorSelect('editTeamSupervisor', '');
-    supSel.value = user.supervisor_id || '';
+    // Se o supervisor vinculado não estiver na lista carregada, mantém-no como opção
+    if (supId && supSel.value !== supId) {
+      var opt = document.createElement('option');
+      opt.value = supId;
+      opt.textContent = user.supervisor || supId;
+      supSel.appendChild(opt);
+      supSel.value = supId;
+    }
+    populateProcessSelect('editTeamProcess', user.process || '');
     $('editTeamGoal').value = user.goal_money > 0 ? user.goal_money : '';
     $('editTeamShiftStart').value = user.shift_start || '';
     $('editTeamShiftEnd').value = user.shift_end || '';
@@ -2103,6 +2154,7 @@ function saveEditTeam() {
   var id = $('editTeamId').value;
   var name = $('editTeamName').value.trim();
   var supId = $('editTeamSupervisor').value;
+  var process = $('editTeamProcess').value;
   var goalRaw = $('editTeamGoal').value;
   var goalMoney = parseFloat(goalRaw) || 0;
   var shiftStart = $('editTeamShiftStart').value;
@@ -2129,6 +2181,7 @@ function saveEditTeam() {
           username: name,
           supervisor_id: supUser ? supId : '',
           supervisor: supUser ? supUser.username || '' : '',
+          process: process || '',
           goal_money: goalMoney,
           shift_start: shiftStart || '',
           shift_end: shiftEnd || '',
@@ -2145,6 +2198,7 @@ function saveEditTeam() {
       username: name,
       supervisor_id: '',
       supervisor: '',
+      process: process || '',
       goal_money: goalMoney,
       shift_start: shiftStart || '',
       shift_end: shiftEnd || '',
